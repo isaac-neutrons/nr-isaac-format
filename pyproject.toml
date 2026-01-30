@@ -23,11 +23,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
-    "data-assembler @ file:///home/mat/git/data-assembler",
+    "data-assembler @ git+https://github.com/isaac-neutrons/data-assembler.git",
     "jsonschema>=4.0",
     "python-ulid>=2.0",
     "click>=8.0",
-    "pydantic>=2.0",
 ]
 
 [project.optional-dependencies]
