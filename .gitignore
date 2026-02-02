@@ -85,7 +85,6 @@ dmypy.json
 .ruff_cache/
 
 # Output files
-output/
 *.parquet
 examples/output/
 
