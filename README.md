@@ -7,7 +7,7 @@ Write neutron reflectometry data from [data-assembler](https://github.com/mdouce
 
 ## Overview
 
-This package provides a minimal writer that converts `AssemblyResult` from data-assembler into the ISAAC AI-Ready Scientific Record format. It follows the same pattern as data-assembler's `JSONWriter` and `ParquetWriter`.
+This package provides a manifest-driven CLI and writer that converts neutron reflectometry data into the ISAAC AI-Ready Scientific Record format. You describe your sample and measurements in a single YAML manifest file, and the tool handles parsing, assembly via [data-assembler](https://github.com/mdoucet/data-assembler), and ISAAC record generation — one record per measurement.
 
 ## Installation
 
@@ -17,54 +17,104 @@ pip install -e .
 
 ## Quick Start
 
-### From Python
+### 1. Create a manifest
 
-```python
-from assembler.workflow import DataAssembler
-from nr_isaac_format import IsaacWriter
+Write a YAML file describing your sample and measurements:
 
-# Get assembled data from data-assembler
-assembler = DataAssembler()
-result = assembler.assemble(reduced=reduced_data)
+```yaml
+title: "IPTS-34347 Cu/THF non-aqueous experiment"
 
-# Write to ISAAC format
-writer = IsaacWriter()
-writer.write(result, "isaac_record.json")
+sample:
+  description: "Cu in THF on Si"
+  model: /path/to/model.json
+  model_dataset_index: 1
 
-# Or get dict directly
-record = writer.to_isaac(result)
+output: ./output
+
+measurements:
+  - name: "Steady-state OCV"
+    reduced: /path/to/REFL_218386_reduced_data.txt
+    parquet: /path/to/parquet/
+    model: /path/to/model.json
+    model_dataset_index: 1
+    environment: "Electrochemical cell, THF electrolyte, steady-state OCV"
+
+  - name: "Final OCV"
+    reduced: /path/to/REFL_218393_combined_data_auto.txt
+    model: /path/to/model.json
+    model_dataset_index: 2
+    environment: "Electrochemical cell, THF electrolyte, final OCV"
 ```
 
-### From Command Line
+### 2. Run the conversion
 
 ```bash
-# Convert reduced data via data-assembler pipeline
-nr-isaac-format convert -r reduced.txt -o isaac_record.json
-
-# With parquet metadata and model
-nr-isaac-format convert -r reduced.txt -p parquet/ -m model.json -o output.json
-
-# Convert pre-assembled JSON
-nr-isaac-format from-json -i assembled.json -o isaac_record.json
-
-# Validate an existing ISAAC record
-nr-isaac-format validate isaac_record.json
+nr-isaac-format convert experiment.yaml
 ```
 
-## API
+This produces one ISAAC JSON file per measurement in the `output` directory:
+
+```
+output/
+  isaac_record_01_steady-state_ocv.json
+  isaac_record_02_final_ocv.json
+```
+
+### Command Line Reference
+
+```bash
+# Convert measurements from a manifest
+nr-isaac-format convert experiment.yaml
+
+# Preview without writing files
+nr-isaac-format convert --dry-run experiment.yaml
+
+# Output compact (non-indented) JSON
+nr-isaac-format convert --compact experiment.yaml
+
+# Validate an existing ISAAC record against the schema
+nr-isaac-format validate output/isaac_record_01_steady-state_ocv.json
+```
+
+### Manifest Format
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `title` | No | Experiment title (included in each ISAAC record) |
+| `sample.description` | No | Sample description text |
+| `sample.model` | No | Default model JSON file for all measurements |
+| `sample.model_dataset_index` | No | Default 1-based dataset index in co-refinement models |
+| `output` | Yes | Output directory for ISAAC JSON files |
+| `measurements` | Yes | List of measurements (at least one) |
+| `measurements[].name` | Yes | Human-readable measurement name |
+| `measurements[].reduced` | Yes | Path to reduced reflectivity data file |
+| `measurements[].parquet` | No | Directory containing parquet metadata files |
+| `measurements[].model` | No | Model JSON (overrides `sample.model`) |
+| `measurements[].model_dataset_index` | No | Dataset index (overrides `sample.model_dataset_index`) |
+| `measurements[].environment` | No | Environment description text |
+
+The first measurement's model is used to create the sample record. All subsequent measurements reuse the same sample ID.
+
+## Python API
 
 ### IsaacWriter
 
 ```python
-class IsaacWriter:
-    def __init__(self, output_dir: str | Path | None = None):
-        """Initialize writer with optional default output directory."""
+from assembler.parsers import ManifestParser, ReducedParser
+from assembler.workflow import DataAssembler
+from nr_isaac_format import IsaacWriter
 
-    def to_isaac(self, result: AssemblyResult) -> dict:
-        """Convert AssemblyResult to ISAAC record dict."""
+# Parse and assemble
+manifest = ManifestParser().parse("experiment.yaml")
+reduced = ReducedParser().parse(manifest.measurements[0].reduced)
+result = DataAssembler().assemble(reduced=reduced)
 
-    def write(self, result: AssemblyResult, output_path: str | Path | None = None) -> Path:
-        """Write AssemblyResult as ISAAC JSON file."""
+# Convert to ISAAC format
+writer = IsaacWriter()
+record = writer.to_isaac(result, title=manifest.title)
+
+# Or write directly to file
+writer.write(result, "isaac_record.json", title=manifest.title)
 ```
 
 ### Convenience Function
@@ -77,18 +127,21 @@ path = write_isaac_record(result, "output.json")
 
 ## Output Format
 
+Each ISAAC record is a JSON file conforming to the ISAAC AI-Ready Scientific Record v1.0 schema:
+
 ```json
 {
   "isaac_record_version": "1.0",
   "record_id": "01JFH3Q8Z1Q9F0XG3V7N4K2M8C",
   "record_type": "evidence",
   "record_domain": "characterization",
+  "title": "IPTS-34347 Cu/THF non-aqueous experiment",
   "timestamps": {"created_utc": "...", "acquired_start_utc": "..."},
   "acquisition_source": {"source_type": "facility", "facility": {...}},
   "measurement": {"series": [...], "qc": {"status": "valid"}},
   "descriptors": {"outputs": [...]},
   "sample": {...},
-  "context": {...},
+  "context": {"environment": "Electrochemical cell, THF electrolyte, ..."},
   "system": {...},
   "assets": [...]
 }

@@ -33,12 +33,17 @@ class IsaacWriter:
         if self.output_dir:
             self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def to_isaac(self, result: AssemblyResult) -> dict[str, Any]:
+    def to_isaac(
+        self,
+        result: AssemblyResult,
+        environment_description: str | None = None,
+    ) -> dict[str, Any]:
         """
         Convert AssemblyResult to ISAAC AI-Ready Record format.
 
         Args:
             result: Assembled data from data-assembler
+            environment_description: Optional environment description from manifest
 
         Returns:
             ISAAC record as a dictionary
@@ -64,8 +69,12 @@ class IsaacWriter:
             if sample_block:
                 record["sample"] = sample_block
 
-        if result.environment:
-            context_block = self._map_context(result.environment)
+        # Build context from environment record and/or manifest description
+        env = result.environment or {}
+        if environment_description and not env.get("description"):
+            env["description"] = environment_description
+        if env:
+            context_block = self._map_context(env)
             if context_block:
                 record["context"] = context_block
 
@@ -80,18 +89,24 @@ class IsaacWriter:
 
         return record
 
-    def write(self, result: AssemblyResult, output_path: str | Path | None = None) -> Path:
+    def write(
+        self,
+        result: AssemblyResult,
+        output_path: str | Path | None = None,
+        environment_description: str | None = None,
+    ) -> Path:
         """
         Write AssemblyResult as ISAAC record to JSON file.
 
         Args:
             result: Assembled data from data-assembler
             output_path: Output file path. If None, uses output_dir/isaac_record.json
+            environment_description: Optional environment description from manifest
 
         Returns:
             Path to written file
         """
-        record = self.to_isaac(result)
+        record = self.to_isaac(result, environment_description=environment_description)
 
         if output_path:
             path = Path(output_path)
@@ -182,6 +197,7 @@ class IsaacWriter:
                     "source": "computed",
                     "value": min(q),
                     "unit": "Å⁻¹",
+                    "uncertainty": {"type": "none"},
                 },
                 {
                     "name": "q_range_max",
@@ -189,6 +205,7 @@ class IsaacWriter:
                     "source": "computed",
                     "value": max(q),
                     "unit": "Å⁻¹",
+                    "uncertainty": {"type": "none"},
                 },
                 {
                     "name": "total_points",
@@ -196,6 +213,7 @@ class IsaacWriter:
                     "source": "computed",
                     "value": len(q),
                     "unit": "count",
+                    "uncertainty": {"type": "none"},
                 },
             ])
 
@@ -206,6 +224,7 @@ class IsaacWriter:
                 "kind": "categorical",
                 "source": "metadata",
                 "value": geometry,
+                "uncertainty": {"type": "none"},
             })
 
         return {
@@ -230,6 +249,7 @@ class IsaacWriter:
         if sample.get("main_composition"):
             result["material"] = {
                 "name": sample["main_composition"],
+                "formula": sample.get("formula", sample["main_composition"]),
                 "provenance": "model_fitted",
             }
 
@@ -250,6 +270,16 @@ class IsaacWriter:
         if not facility and not instrument:
             return None
 
+        # Build flat configuration from reflectivity metadata
+        refl_data = refl.get("reflectivity", {})
+        configuration: dict[str, str | int | float | bool] = {}
+        if refl_data.get("measurement_geometry"):
+            configuration["measurement_geometry"] = refl_data["measurement_geometry"]
+        if refl_data.get("probe"):
+            configuration["probe"] = refl_data["probe"]
+        if not configuration:
+            configuration["technique"] = "neutron_reflectometry"
+
         return {
             "domain": "experimental",
             "instrument": {
@@ -260,6 +290,7 @@ class IsaacWriter:
                 "facility_name": facility or "unknown",
                 "beamline": instrument,
             },
+            "configuration": configuration,
         }
 
     def _map_context(self, env: dict) -> dict[str, Any] | None:
@@ -267,10 +298,11 @@ class IsaacWriter:
         if not env:
             return None
 
-        result = {}
-
-        if env.get("temperature"):
-            result["temperature_K"] = env["temperature"]
+        # environment and temperature_K are required by the schema
+        result: dict[str, Any] = {
+            "environment": env.get("description", "not specified"),
+            "temperature_K": env.get("temperature") if env.get("temperature") is not None else 295.0,
+        }
 
         if env.get("pressure"):
             result["pressure_Pa"] = env["pressure"]
@@ -278,10 +310,7 @@ class IsaacWriter:
         if env.get("ambient_medium"):
             result["ambient_medium"] = env["ambient_medium"]
 
-        if env.get("description"):
-            result["environment"] = env["description"]
-
-        return result if result else None
+        return result
 
     def _map_assets(self, refl: dict, result: AssemblyResult) -> list[dict[str, Any]] | None:
         """Map file references to ISAAC assets block."""
@@ -293,6 +322,7 @@ class IsaacWriter:
                 "asset_id": "raw_nexus_file",
                 "content_role": "raw_data_pointer",
                 "uri": str(raw_file),
+                "sha256": self._file_sha256(raw_file),
             })
 
         if result.reduced_file:
@@ -300,9 +330,27 @@ class IsaacWriter:
                 "asset_id": "reduced_data",
                 "content_role": "reduction_product",
                 "uri": str(result.reduced_file),
+                "sha256": self._file_sha256(result.reduced_file),
             })
 
         return assets if assets else None
+
+    @staticmethod
+    def _file_sha256(file_path: str | Path) -> str:
+        """Compute SHA-256 hex digest of a file, or return empty string if inaccessible."""
+        import hashlib
+
+        path = Path(file_path)
+        if not path.is_file():
+            return ""
+        try:
+            h = hashlib.sha256()
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(8192), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+        except OSError:
+            return ""
 
 
 def write_isaac_record(result: AssemblyResult, output_path: str | Path) -> Path:

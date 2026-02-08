@@ -3,24 +3,28 @@ NR-ISAAC Format Writer.
 
 Convert neutron reflectometry data from data-assembler to ISAAC AI-Ready Record format.
 
-This package provides a writer to transform AssemblyResult from data-assembler
-into JSON records conforming to the ISAAC AI-Ready Scientific Record v1.0 schema.
+This package provides a CLI and writer to transform data described by a YAML
+manifest into JSON records conforming to the ISAAC AI-Ready Scientific Record
+v1.0 schema.
 
-Example::
+CLI usage::
 
+    nr-isaac-format convert experiment.yaml
+    nr-isaac-format validate output/isaac_record_01_steady-state_ocv.json
+
+Programmatic usage::
+
+    from assembler.parsers import ManifestParser, ReducedParser
     from assembler.workflow import DataAssembler
     from nr_isaac_format import IsaacWriter
 
-    # Get assembled data from data-assembler
-    assembler = DataAssembler()
-    result = assembler.assemble(reduced=reduced_data)
+    # Parse manifest and assemble data
+    manifest = ManifestParser().parse("experiment.yaml")
+    result = DataAssembler().assemble(reduced=ReducedParser().parse(...))
 
-    # Write to ISAAC format
+    # Convert to ISAAC format
     writer = IsaacWriter()
-    writer.write(result, "isaac_record.json")
-
-    # Or get dict directly
-    record = writer.to_isaac(result)
+    record = writer.to_isaac(result, title=manifest.title)
 """
 
 __version__ = "0.1.0"

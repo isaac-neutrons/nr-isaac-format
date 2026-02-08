@@ -94,6 +94,9 @@ class TestIsaacWriter:
         assert "q_range_max" in names
         assert "total_points" in names
         assert "measurement_geometry" in names
+        # All descriptors must have uncertainty
+        for d in descriptors:
+            assert "uncertainty" in d
 
     def test_with_sample_data(self):
         """Should map sample data when present."""
@@ -113,6 +116,7 @@ class TestIsaacWriter:
 
         assert "sample" in record
         assert record["sample"]["material"]["name"] == "Fe/Si"
+        assert record["sample"]["material"]["formula"] == "Fe/Si"
         assert record["sample"]["geometry"]["layer_count"] == 2
         assert record["sample"]["geometry"]["total_thickness_nm"] == 510.0
 
@@ -124,6 +128,7 @@ class TestIsaacWriter:
                 "temperature": 298.0,
                 "pressure": 101325.0,
                 "ambient_medium": "D2O",
+                "description": "in_situ",
             },
         )
 
@@ -136,6 +141,62 @@ class TestIsaacWriter:
         assert ctx["pressure_Pa"] == 101325.0
         assert ctx["ambient_medium"] == "D2O"
         assert ctx["environment"] == "in_situ"
+
+    def test_context_defaults_required_fields(self):
+        """Should default temperature_K and environment when not provided."""
+        result = create_mock_result(
+            reflectivity={"facility": "SNS"},
+            environment={"ambient_medium": "air"},
+        )
+
+        writer = IsaacWriter()
+        record = writer.to_isaac(result)
+
+        ctx = record["context"]
+        assert ctx["temperature_K"] == 295.0  # default
+        assert ctx["environment"] == "not specified"  # default
+
+    def test_system_includes_configuration(self):
+        """Should include required configuration block in system."""
+        result = create_mock_result(
+            reflectivity={
+                "facility": "SNS",
+                "instrument_name": "REF_L",
+                "reflectivity": {"measurement_geometry": "front reflection"},
+            },
+        )
+
+        writer = IsaacWriter()
+        record = writer.to_isaac(result)
+
+        assert "system" in record
+        assert "configuration" in record["system"]
+        assert record["system"]["configuration"]["measurement_geometry"] == "front reflection"
+
+    def test_with_environment_description_no_env_record(self):
+        """Should create context block from manifest environment_description."""
+        result = create_mock_result(reflectivity={"facility": "SNS"})
+        writer = IsaacWriter()
+        record = writer.to_isaac(
+            result, environment_description="Electrochemical cell, THF electrolyte"
+        )
+
+        assert "context" in record
+        assert record["context"]["environment"] == "Electrochemical cell, THF electrolyte"
+        assert "temperature_K" in record["context"]  # required by schema
+
+    def test_environment_description_does_not_override_existing(self):
+        """Should not override existing environment description."""
+        result = create_mock_result(
+            reflectivity={"facility": "SNS"},
+            environment={"description": "From parquet data"},
+        )
+        writer = IsaacWriter()
+        record = writer.to_isaac(
+            result, environment_description="From manifest"
+        )
+
+        assert record["context"]["environment"] == "From parquet data"
 
     def test_write_to_file(self, tmp_path):
         """Should write ISAAC record to JSON file."""
