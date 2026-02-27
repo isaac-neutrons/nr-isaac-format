@@ -5,14 +5,19 @@ Manifest-driven CLI for converting data-assembler output to ISAAC format.
 Takes a YAML manifest file describing a sample and its measurements,
 runs each measurement through the data-assembler pipeline, and writes
 one ISAAC AI-Ready Record per measurement.
+
+Also provides commands for pushing records to the ISAAC Portal API.
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional
 
 import click
+import httpx
+from dotenv import load_dotenv
 
 from . import __version__
 from .writer import IsaacWriter
@@ -235,6 +240,195 @@ def validate(file: Path) -> None:
         click.echo(f"✓ Valid ISAAC record: {file}")
     except jsonschema.ValidationError as e:
         click.echo(f"✗ Validation failed: {e.message}", err=True)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Helper: resolve ISAAC credentials from env / options
+# ---------------------------------------------------------------------------
+
+def _resolve_credentials(
+    url: Optional[str], token: Optional[str]
+) -> tuple[str, str]:
+    """Return (base_url, api_token), loading .env if needed."""
+    load_dotenv()  # loads .env from cwd (or parents) if present
+
+    base_url = url or os.environ.get("ISAAC_URL", "")
+    api_token = token or os.environ.get("ISAAC_KEY", "")
+
+    if not base_url:
+        click.echo(
+            click.style(
+                "Error: No API URL. Set ISAAC_URL in .env or pass --url.",
+                fg="red",
+            ),
+            err=True,
+        )
+        sys.exit(1)
+
+    if not api_token:
+        click.echo(
+            click.style(
+                "Error: No API token. Set ISAAC_KEY in .env or pass --token.",
+                fg="red",
+            ),
+            err=True,
+        )
+        sys.exit(1)
+
+    return base_url, api_token
+
+
+def _collect_json_files(paths: tuple[str, ...]) -> list[Path]:
+    """Expand CLI paths/directories into a sorted list of JSON file paths."""
+    files: list[Path] = []
+    for p in paths:
+        path = Path(p)
+        if path.is_dir():
+            files.extend(sorted(path.glob("*.json")))
+        elif path.is_file():
+            files.append(path)
+        else:
+            click.echo(
+                click.style(f"Warning: skipping {p} (not found)", fg="yellow"),
+                err=True,
+            )
+    return files
+
+
+# ---------------------------------------------------------------------------
+# push command
+# ---------------------------------------------------------------------------
+
+@main.command()
+@click.argument("paths", nargs=-1, required=True)
+@click.option(
+    "--validate-only",
+    is_flag=True,
+    help="Validate records against the remote API without persisting.",
+)
+@click.option("--url", default=None, help="Override ISAAC_URL from .env.")
+@click.option("--token", default=None, help="Override ISAAC_KEY from .env.")
+def push(paths: tuple[str, ...], validate_only: bool, url: Optional[str], token: Optional[str]) -> None:
+    """Push ISAAC record JSON files to the ISAAC Portal API.
+
+    PATHS can be one or more JSON files or directories containing JSON files.
+
+    \b
+    Examples:
+        nr-isaac-format push output/
+        nr-isaac-format push output/isaac_record_218386.json
+        nr-isaac-format push output/ --validate-only
+        nr-isaac-format push output/ --token my-secret-key
+    """
+    from .client import IsaacClient, IsaacAuthError, IsaacValidationError, IsaacAPIError
+
+    base_url, api_token = _resolve_credentials(url, token)
+    files = _collect_json_files(paths)
+
+    if not files:
+        click.echo(click.style("No JSON files found in the given paths.", fg="yellow"), err=True)
+        sys.exit(1)
+
+    mode = "Validating" if validate_only else "Pushing"
+    click.echo(click.style(f"{mode} {len(files)} record(s) → {base_url}", fg="cyan", bold=True))
+    click.echo()
+
+    succeeded = 0
+    failed = 0
+
+    with IsaacClient(base_url, api_token) as client:
+        for file_path in files:
+            label = file_path.name
+            try:
+                with open(file_path) as f:
+                    record = json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
+                click.echo(click.style(f"  ✗ {label}: {e}", fg="red"), err=True)
+                failed += 1
+                continue
+
+            try:
+                if validate_only:
+                    result = client.validate(record)
+                    if result.get("valid"):
+                        click.echo(click.style(f"  ✓ {label}: valid", fg="green"))
+                        succeeded += 1
+                    else:
+                        click.echo(click.style(f"  ✗ {label}: validation failed", fg="red"))
+                        for err in result.get("schema_errors", []):
+                            click.echo(f"      schema: {err}", err=True)
+                        for err in result.get("vocabulary_errors", []):
+                            msg = err.get("message", err) if isinstance(err, dict) else err
+                            click.echo(f"      vocab:  {msg}", err=True)
+                        failed += 1
+                else:
+                    result = client.create(record)
+                    rid = result.get("record_id", "?")
+                    click.echo(click.style(f"  ✓ {label}: created (record_id={rid})", fg="green"))
+                    succeeded += 1
+
+            except IsaacAuthError as e:
+                click.echo(
+                    click.style(f"  ✗ Authentication error: {e.detail}", fg="red"),
+                    err=True,
+                )
+                click.echo("Aborting — check your ISAAC_KEY.", err=True)
+                sys.exit(1)
+
+            except IsaacValidationError as e:
+                click.echo(click.style(f"  ✗ {label}: validation failed", fg="red"))
+                for err in e.schema_errors:
+                    click.echo(f"      schema: {err}", err=True)
+                for err in e.vocabulary_errors:
+                    msg = err.get("message", err) if isinstance(err, dict) else err
+                    click.echo(f"      vocab:  {msg}", err=True)
+                failed += 1
+
+            except IsaacAPIError as e:
+                click.echo(click.style(f"  ✗ {label}: {e}", fg="red"), err=True)
+                failed += 1
+
+            except httpx.HTTPError as e:
+                click.echo(click.style(f"  ✗ {label}: network error — {e}", fg="red"), err=True)
+                failed += 1
+
+    # Summary
+    click.echo()
+    click.echo(click.style("─" * 50, fg="cyan"))
+    action = "validated" if validate_only else "pushed"
+    if failed == 0:
+        click.echo(click.style(f"All {succeeded} record(s) {action} successfully.", fg="green"))
+    else:
+        click.echo(
+            click.style(f"{succeeded} succeeded, {failed} failed.", fg="yellow" if succeeded else "red")
+        )
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# health command
+# ---------------------------------------------------------------------------
+
+@main.command()
+@click.option("--url", default=None, help="Override ISAAC_URL from .env.")
+@click.option("--token", default=None, help="Override ISAAC_KEY from .env.")
+def health(url: Optional[str], token: Optional[str]) -> None:
+    """Check connectivity to the ISAAC Portal API."""
+    from .client import IsaacClient, IsaacAPIError
+
+    base_url, api_token = _resolve_credentials(url, token)
+
+    try:
+        with IsaacClient(base_url, api_token) as client:
+            result = client.health()
+            status = result.get("status", "unknown")
+            click.echo(click.style(f"✓ API healthy (status={status})", fg="green"))
+    except IsaacAPIError as e:
+        click.echo(click.style(f"✗ API error: {e}", fg="red"), err=True)
+        sys.exit(1)
+    except httpx.HTTPError as e:
+        click.echo(click.style(f"✗ Connection failed: {e}", fg="red"), err=True)
         sys.exit(1)
 
 
