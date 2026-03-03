@@ -1,10 +1,10 @@
 {
   "isaac_record_version": "1.0",
-  "record_id": "01KGXQEEPQ313VH6CAHES0ZD03",
+  "record_id": "01KJT4R027EHN63N4WW8N2PVGN",
   "record_type": "evidence",
   "record_domain": "characterization",
   "timestamps": {
-    "created_utc": "2026-02-08T04:16:35.543819Z",
+    "created_utc": "2026-03-03T15:23:25.639890Z",
     "acquired_start_utc": "2025-04-20T09:42:43.100443-04:00"
   },
   "acquisition_source": {
@@ -1054,8 +1054,8 @@
     },
     "outputs": [
       {
-        "label": "automated_extraction_2026-02-08",
-        "generated_utc": "2026-02-08T04:16:35.543819Z",
+        "label": "automated_extraction_2026-03-03",
+        "generated_utc": "2026-03-03T15:23:25.639890Z",
         "generated_by": {
           "agent": "nr-isaac-format",
           "version": "0.1.0"
@@ -1090,36 +1090,22 @@
             "uncertainty": {
               "type": "none"
             }
-          },
-          {
-            "name": "measurement_geometry",
-            "kind": "categorical",
-            "source": "metadata",
-            "value": "back reflection",
-            "uncertainty": {
-              "type": "none"
-            }
           }
         ]
       }
     ]
   },
   "sample": {
-    "sample_form": "thin_film",
+    "sample_form": "film",
     "material": {
-      "name": "Cu",
-      "formula": "Cu",
-      "provenance": "model_fitted"
-    },
-    "geometry": {
-      "layer_count": 4,
-      "total_thickness_nm": 550.8545606116544
+      "name": "Unknown",
+      "formula": "Unknown"
     }
   },
   "context": {
-    "environment": "Electrochemical cell, THF electrolyte, steady-state OCV",
+    "environment": "operando",
     "temperature_K": 295.0,
-    "ambient_medium": "THF"
+    "description": "Steady-state OCV before applying potential. Sample is about 50 nm film of Cu on 5 nm Ti on a Si substrate. Measured in an electrochemical cell with the beam coming from the back of the sample (Si side). Electrolyte is d8-THF with 1 M LiBF4 and 1 V% EtOH."
   },
   "system": {
     "domain": "experimental",
@@ -1132,20 +1118,20 @@
       "beamline": "REF_L"
     },
     "configuration": {
-      "measurement_geometry": "back reflection"
+      "technique": "neutron_reflectometry"
     }
   },
   "assets": [
     {
       "asset_id": "raw_nexus_file",
       "content_role": "raw_data_pointer",
-      "uri": "/home/mat/data/REF_L_218386.nxs.h5",
-      "sha256": "329726e19756c4b31ca465cea546871a6c8b3f9e867aea5c80b7c47f7c998c0a"
+      "uri": "/SNS/REF_L/IPTS-34347/nexus/REF_L_218386.nxs.h5",
+      "sha256": ""
     },
     {
       "asset_id": "reduced_data",
       "content_role": "reduction_product",
-      "uri": "/home/mat/data/REFL_218386_reduced_data.txt",
+      "uri": "REFL_218386_reduced_data.txt",
       "sha256": "96aafebfb3bf2c2fe11ec87ca7dd967d222996701345eb331ba836e409e715f8"
     }
   ]

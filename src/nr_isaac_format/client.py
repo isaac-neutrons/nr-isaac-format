@@ -149,6 +149,19 @@ class IsaacClient:
         self._check_response(resp)
         return resp.json()
 
+    def get_schema(self) -> dict[str, Any]:
+        """Retrieve the latest ISAAC record schema.
+
+        Returns:
+            The JSON Schema dictionary.
+
+        Raises:
+            IsaacAPIError: If the schema endpoint returns a non-200 status.
+        """
+        resp = self._client.get(f"{self.base_url}/schema")
+        self._check_response(resp)
+        return resp.json()
+
     # -- helpers --------------------------------------------------------------
 
     def _check_response(
@@ -158,9 +171,11 @@ class IsaacClient:
         if resp.status_code in (401, 403):
             detail = self._extract_detail(resp)
             raise IsaacAuthError(resp.status_code, detail)
-        if resp.status_code == 400 and not allow_400:
-            detail = self._extract_detail(resp)
-            raise IsaacAPIError(resp.status_code, detail)
+        if resp.status_code == 400:
+            if not allow_400:
+                detail = self._extract_detail(resp)
+                raise IsaacAPIError(resp.status_code, detail)
+            return
         if resp.status_code >= 400:
             detail = self._extract_detail(resp)
             raise IsaacAPIError(resp.status_code, detail)

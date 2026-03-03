@@ -69,6 +69,8 @@ def convert(manifest: Path, compact: bool, dry_run: bool) -> None:
     from assembler.tools.detection import extract_run_number
     from assembler.workflow import DataAssembler
 
+    import yaml
+
     # Parse manifest
     parser = ManifestParser()
     try:
@@ -76,6 +78,11 @@ def convert(manifest: Path, compact: bool, dry_run: bool) -> None:
     except Exception as e:
         click.echo(click.style(f"Error parsing manifest: {e}", fg="red"), err=True)
         sys.exit(1)
+
+    # Load raw YAML to extract extra fields not in ManifestMeasurement
+    with open(manifest) as f:
+        raw_yaml = yaml.safe_load(f)
+    raw_measurements = raw_yaml.get("measurements", [])
 
     # Validate
     errors = manifest_data.validate()
@@ -104,6 +111,11 @@ def convert(manifest: Path, compact: bool, dry_run: bool) -> None:
     for i, measurement in enumerate(manifest_data.measurements):
         step = f"[{i + 1}/{len(manifest_data.measurements)}]"
         click.echo(click.style(f"{step} {measurement.name}", fg="cyan"))
+
+        # Extract extra fields from raw YAML that ManifestMeasurement drops
+        raw_m = raw_measurements[i] if i < len(raw_measurements) else {}
+        m_context: str | None = raw_m.get("context")
+        m_raw: str | None = raw_m.get("raw")
 
         # Parse reduced data (required)
         try:
@@ -183,6 +195,8 @@ def convert(manifest: Path, compact: bool, dry_run: bool) -> None:
         record = writer.to_isaac(
             result,
             environment_description=measurement.environment,
+            context_description=m_context,
+            raw_file_path=m_raw,
         )
 
         if dry_run:
@@ -217,15 +231,39 @@ def convert(manifest: Path, compact: bool, dry_run: bool) -> None:
             click.echo(f"  {path}")
 
 
+def _find_latest_schema(schema_dir: Path) -> Path | None:
+    """Find the latest bundled schema file, preferring ornl-rev variants."""
+    import re
+
+    best_path: Path | None = None
+    best_rev = -1
+
+    for f in schema_dir.glob("isaac_record_v*-ornl-rev*.json"):
+        m = re.search(r"-ornl-rev(\d+)\.json$", f.name)
+        if m:
+            rev = int(m.group(1))
+            if rev > best_rev:
+                best_rev = rev
+                best_path = f
+
+    if best_path:
+        return best_path
+
+    # Fall back to the original schema file
+    fallback = schema_dir / "isaac_record_v1.json"
+    return fallback if fallback.exists() else None
+
+
 @main.command()
 @click.argument("file", type=click.Path(exists=True, path_type=Path))
 def validate(file: Path) -> None:
     """Validate an ISAAC record against the schema."""
     import jsonschema
 
-    # Load bundled schema
-    schema_path = Path(__file__).parent / "schema" / "isaac_record_v1.json"
-    if not schema_path.exists():
+    # Load bundled schema — prefer ornl-rev schema if available
+    schema_dir = Path(__file__).parent / "schema"
+    schema_path = _find_latest_schema(schema_dir)
+    if not schema_path:
         click.echo("Schema file not found", err=True)
         sys.exit(1)
 
@@ -430,6 +468,120 @@ def health(url: Optional[str], token: Optional[str]) -> None:
     except httpx.HTTPError as e:
         click.echo(click.style(f"✗ Connection failed: {e}", fg="red"), err=True)
         sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# fetch-schema command
+# ---------------------------------------------------------------------------
+
+def _extract_schema_version(schema: dict) -> str:
+    """Extract the major schema version number from a schema dict.
+
+    Looks for a top-level ``version`` key first, then parses the ``title``
+    field for a pattern like ``v1.0``.
+
+    Returns:
+        Version string (e.g. ``"1"``).
+    """
+    import re
+
+    # Prefer explicit version field
+    version = schema.get("version")
+    if version:
+        # Take the major part: "1.0" → "1", "2" → "2"
+        return str(version).split(".")[0]
+
+    # Fall back to title parsing
+    title = schema.get("title", "")
+    match = re.search(r"v(\d+)", title, re.IGNORECASE)
+    if match:
+        return match.group(1)
+
+    return "unknown"
+
+
+def _next_revision(schema_dir: Path, version: str) -> int:
+    """Determine the next revision number for a given schema version.
+
+    Scans *schema_dir* for files matching
+    ``isaac_record_v<version>-ornl-rev<N>.json`` and returns ``max(N) + 1``.
+    Returns ``1`` when no prior revisions exist.
+    """
+    import re
+
+    pattern = re.compile(
+        rf"^isaac_record_v{re.escape(version)}-ornl-rev(\d+)\.json$"
+    )
+    max_rev = 0
+    if schema_dir.is_dir():
+        for f in schema_dir.iterdir():
+            m = pattern.match(f.name)
+            if m:
+                max_rev = max(max_rev, int(m.group(1)))
+    return max_rev + 1
+
+
+@main.command("fetch-schema")
+@click.option("--url", default=None, help="Override ISAAC_URL from .env.")
+@click.option("--token", default=None, help="Override ISAAC_KEY from .env.")
+def fetch_schema(url: Optional[str], token: Optional[str]) -> None:
+    """Fetch the latest ISAAC schema from the Portal API and save it locally.
+
+    The schema is saved to
+    src/nr_isaac_format/schema/isaac_record_v<N>-ornl-rev<M>.json
+    where N is the schema version and M is an auto-incremented local revision.
+
+    If the fetched schema is identical to the latest local revision, no new
+    file is written.
+    """
+    from .client import IsaacAPIError, IsaacClient
+
+    base_url, api_token = _resolve_credentials(url, token)
+    schema_dir = Path(__file__).parent / "schema"
+    schema_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with IsaacClient(base_url, api_token) as client:
+            schema = client.get_schema()
+    except IsaacAPIError as e:
+        click.echo(click.style(f"✗ API error: {e}", fg="red"), err=True)
+        sys.exit(1)
+    except httpx.HTTPError as e:
+        click.echo(click.style(f"✗ Connection failed: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+    version = _extract_schema_version(schema)
+    if version == "unknown":
+        click.echo(
+            click.style("Warning: could not detect schema version; using 'unknown'", fg="yellow"),
+            err=True,
+        )
+
+    next_rev = _next_revision(schema_dir, version)
+    new_content = json.dumps(schema, indent=2) + "\n"
+
+    # Check if the content matches the latest existing revision
+    if next_rev > 1:
+        prev_file = schema_dir / f"isaac_record_v{version}-ornl-rev{next_rev - 1}.json"
+        if prev_file.exists():
+            existing = prev_file.read_text()
+            if existing == new_content:
+                click.echo(
+                    click.style(
+                        f"Schema unchanged (matches rev {next_rev - 1})",
+                        fg="cyan",
+                    )
+                )
+                return
+
+    out_path = schema_dir / f"isaac_record_v{version}-ornl-rev{next_rev}.json"
+    out_path.write_text(new_content)
+    click.echo(
+        click.style(
+            f"✓ Saved schema v{version} rev {next_rev} → {out_path}",
+            fg="green",
+        )
+    )
 
 
 if __name__ == "__main__":

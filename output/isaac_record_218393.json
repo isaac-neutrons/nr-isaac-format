@@ -1,17 +1,17 @@
 {
   "isaac_record_version": "1.0",
-  "record_id": "01KGXQEEPZYWXTZ20SKWY0C9ZQ",
+  "record_id": "01KJT4R02BKD62CZT6N949FVEA",
   "record_type": "evidence",
   "record_domain": "characterization",
   "timestamps": {
-    "created_utc": "2026-02-08T04:16:35.551689Z",
+    "created_utc": "2026-03-03T15:23:25.643574Z",
     "acquired_start_utc": "2025-04-20T17:23:26.133180"
   },
   "acquisition_source": {
     "source_type": "facility",
     "facility": {
       "site": "SNS",
-      "beamline": "Unknown",
+      "beamline": "REF_L",
       "endstation": "reflectometer"
     }
   },
@@ -2990,8 +2990,8 @@
     },
     "outputs": [
       {
-        "label": "automated_extraction_2026-02-08",
-        "generated_utc": "2026-02-08T04:16:35.551689Z",
+        "label": "automated_extraction_2026-03-03",
+        "generated_utc": "2026-03-03T15:23:25.643574Z",
         "generated_by": {
           "agent": "nr-isaac-format",
           "version": "0.1.0"
@@ -3026,44 +3026,41 @@
             "uncertainty": {
               "type": "none"
             }
-          },
-          {
-            "name": "measurement_geometry",
-            "kind": "categorical",
-            "source": "metadata",
-            "value": "back reflection",
-            "uncertainty": {
-              "type": "none"
-            }
           }
         ]
       }
     ]
   },
   "context": {
-    "environment": "Electrochemical cell, THF electrolyte, final OCV",
+    "environment": "operando",
     "temperature_K": 295.0,
-    "ambient_medium": "THF"
+    "description": "Steady-state OCV after applying reducing potentials in steps for EIS measurements from -0.1 V to -0.4 V. Sample is about 50 nm film of Cu on 5 nm Ti on a Si substrate. Measured in an electrochemical cell with the beam coming from the back of the sample (Si side). Electrolyte is d8-THF with 1 M LiBF4 and 1 V% EtOH."
   },
   "system": {
     "domain": "experimental",
     "instrument": {
       "instrument_type": "beamline_endstation",
-      "instrument_name": "Unknown"
+      "instrument_name": "REF_L"
     },
     "facility": {
       "facility_name": "SNS",
-      "beamline": "Unknown"
+      "beamline": "REF_L"
     },
     "configuration": {
-      "measurement_geometry": "back reflection"
+      "technique": "neutron_reflectometry"
     }
   },
   "assets": [
     {
+      "asset_id": "raw_nexus_file",
+      "content_role": "raw_data_pointer",
+      "uri": "/SNS/REF_L/IPTS-34347/nexus/REF_L_218393.nxs.h5",
+      "sha256": ""
+    },
+    {
       "asset_id": "reduced_data",
       "content_role": "reduction_product",
-      "uri": "/home/mat/data/REFL_218393_combined_data_auto.txt",
+      "uri": "REFL_218393_combined_data_auto.txt",
       "sha256": "693667270325ac34939a0e366b2d259e52c636dc1d2bb44c946e39b1b981544c"
     }
   ]

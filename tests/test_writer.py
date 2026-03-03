@@ -115,10 +115,41 @@ class TestIsaacWriter:
         record = writer.to_isaac(result)
 
         assert "sample" in record
+        assert record["sample"]["sample_form"] == "film"
         assert record["sample"]["material"]["name"] == "Fe/Si"
         assert record["sample"]["material"]["formula"] == "Fe/Si"
+        # No provenance in enum for plain mock data → key omitted
+        assert "provenance" not in record["sample"]["material"]
         assert record["sample"]["geometry"]["layer_count"] == 2
         assert record["sample"]["geometry"]["total_thickness_nm"] == 510.0
+
+    def test_sample_provenance_mapping(self):
+        """Should map known provenance strings to schema enum values."""
+        result = create_mock_result(
+            reflectivity={"facility": "SNS"},
+            sample={
+                "main_composition": "CuO",
+                "provenance": "commercial",
+                "layers": [],
+            },
+        )
+        writer = IsaacWriter()
+        record = writer.to_isaac(result)
+        assert record["sample"]["material"]["provenance"] == "commercial"
+
+    def test_sample_provenance_normalised(self):
+        """Should normalise non-standard provenance to closest enum value."""
+        result = create_mock_result(
+            reflectivity={"facility": "SNS"},
+            sample={
+                "main_composition": "CuO",
+                "provenance": "model_fitted",
+                "layers": [],
+            },
+        )
+        writer = IsaacWriter()
+        record = writer.to_isaac(result)
+        assert record["sample"]["material"]["provenance"] == "theoretical"
 
     def test_with_environment_data(self):
         """Should map environment data to context block."""
@@ -140,7 +171,21 @@ class TestIsaacWriter:
         assert ctx["temperature_K"] == 298.0
         assert ctx["pressure_Pa"] == 101325.0
         assert ctx["ambient_medium"] == "D2O"
-        assert ctx["environment"] == "in_situ"
+        assert ctx["environment"] == "in_situ"  # enum value
+
+    def test_context_classifies_electrochemical(self):
+        """Should classify electrochemical descriptions as operando."""
+        result = create_mock_result(
+            reflectivity={"facility": "SNS"},
+            environment={
+                "description": "Electrochemical cell, THF electrolyte, steady-state OCV",
+            },
+        )
+        writer = IsaacWriter()
+        record = writer.to_isaac(result)
+        ctx = record["context"]
+        assert ctx["environment"] == "operando"
+        assert ctx["description"] == "Electrochemical cell, THF electrolyte, steady-state OCV"
 
     def test_context_defaults_required_fields(self):
         """Should default temperature_K and environment when not provided."""
@@ -154,7 +199,7 @@ class TestIsaacWriter:
 
         ctx = record["context"]
         assert ctx["temperature_K"] == 295.0  # default
-        assert ctx["environment"] == "not specified"  # default
+        assert ctx["environment"] == "ex_situ"  # default classification
 
     def test_system_includes_configuration(self):
         """Should include required configuration block in system."""
@@ -182,21 +227,88 @@ class TestIsaacWriter:
         )
 
         assert "context" in record
-        assert record["context"]["environment"] == "Electrochemical cell, THF electrolyte"
+        # Electrochemical → classified as operando
+        assert record["context"]["environment"] == "operando"
+        assert record["context"]["description"] == "Electrochemical cell, THF electrolyte"
         assert "temperature_K" in record["context"]  # required by schema
 
     def test_environment_description_does_not_override_existing(self):
         """Should not override existing environment description."""
         result = create_mock_result(
             reflectivity={"facility": "SNS"},
-            environment={"description": "From parquet data"},
+            environment={"description": "in_situ"},
         )
         writer = IsaacWriter()
         record = writer.to_isaac(
             result, environment_description="From manifest"
         )
 
-        assert record["context"]["environment"] == "From parquet data"
+        # Original description is "in_situ" which classifies directly
+        assert record["context"]["environment"] == "in_situ"
+
+    def test_context_description_from_manifest(self):
+        """Should use context_description for the context.description field."""
+        result = create_mock_result(reflectivity={"facility": "SNS"})
+        writer = IsaacWriter()
+        record = writer.to_isaac(
+            result,
+            environment_description="operando",
+            context_description="Electrochemical cell, THF electrolyte, steady-state OCV",
+        )
+
+        ctx = record["context"]
+        assert ctx["environment"] == "operando"
+        assert ctx["description"] == "Electrochemical cell, THF electrolyte, steady-state OCV"
+
+    def test_context_description_overrides_env_text(self):
+        """Explicit context_description should take precedence over env description."""
+        result = create_mock_result(
+            reflectivity={"facility": "SNS"},
+            environment={"description": "Electrochemical cell"},
+        )
+        writer = IsaacWriter()
+        record = writer.to_isaac(
+            result,
+            context_description="Custom context note",
+        )
+
+        ctx = record["context"]
+        assert ctx["description"] == "Custom context note"
+
+    def test_raw_file_path_from_manifest(self):
+        """Should include manifest raw_file_path in assets."""
+        result = create_mock_result(
+            reflectivity={"facility": "SNS", "reflectivity": {"q": [0.01], "r": [0.9]}},
+        )
+        writer = IsaacWriter()
+        record = writer.to_isaac(
+            result,
+            raw_file_path="/SNS/REF_L/IPTS-34347/nexus/REF_L_218386.nxs.h5",
+        )
+
+        assert "assets" in record
+        raw_assets = [a for a in record["assets"] if a["content_role"] == "raw_data_pointer"]
+        assert len(raw_assets) == 1
+        assert raw_assets[0]["uri"] == "/SNS/REF_L/IPTS-34347/nexus/REF_L_218386.nxs.h5"
+
+    def test_raw_file_path_overrides_refl_metadata(self):
+        """Manifest raw_file_path should take precedence over refl metadata."""
+        result = create_mock_result(
+            reflectivity={
+                "facility": "SNS",
+                "raw_file_path": "/old/path.nxs.h5",
+                "reflectivity": {"q": [0.01], "r": [0.9]},
+            },
+        )
+        writer = IsaacWriter()
+        record = writer.to_isaac(
+            result,
+            raw_file_path="/new/manifest/path.nxs.h5",
+        )
+
+        raw_assets = [a for a in record["assets"] if a["content_role"] == "raw_data_pointer"]
+        assert len(raw_assets) == 1
+        assert raw_assets[0]["uri"] == "/new/manifest/path.nxs.h5"
 
     def test_write_to_file(self, tmp_path):
         """Should write ISAAC record to JSON file."""

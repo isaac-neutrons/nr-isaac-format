@@ -170,6 +170,35 @@ class TestListAndGet:
 
 
 # ---------------------------------------------------------------------------
+# IsaacClient.get_schema
+# ---------------------------------------------------------------------------
+
+class TestGetSchema:
+    def test_success(self):
+        client = IsaacClient("https://example.com/api", "tok")
+        client._client = MagicMock()
+        body = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "ISAAC AI-Ready Scientific Record v1.0",
+            "type": "object",
+        }
+        client._client.get.return_value = _mock_response(200, body)
+
+        result = client.get_schema()
+        assert result["title"] == "ISAAC AI-Ready Scientific Record v1.0"
+        client._client.get.assert_called_once_with("https://example.com/api/schema")
+
+    def test_server_error(self):
+        client = IsaacClient("https://example.com/api", "tok")
+        client._client = MagicMock()
+        client._client.get.return_value = _mock_response(500, {"detail": "down"})
+
+        with pytest.raises(IsaacAPIError) as exc_info:
+            client.get_schema()
+        assert exc_info.value.status_code == 500
+
+
+# ---------------------------------------------------------------------------
 # Context manager
 # ---------------------------------------------------------------------------
 

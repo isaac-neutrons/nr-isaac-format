@@ -37,13 +37,17 @@ class IsaacWriter:
         self,
         result: AssemblyResult,
         environment_description: str | None = None,
+        context_description: str | None = None,
+        raw_file_path: str | None = None,
     ) -> dict[str, Any]:
         """
         Convert AssemblyResult to ISAAC AI-Ready Record format.
 
         Args:
             result: Assembled data from data-assembler
-            environment_description: Optional environment description from manifest
+            environment_description: Optional environment/enum value from manifest
+            context_description: Optional free-text context description from manifest
+            raw_file_path: Optional path to raw NeXus file from manifest
 
         Returns:
             ISAAC record as a dictionary
@@ -74,7 +78,7 @@ class IsaacWriter:
         if environment_description and not env.get("description"):
             env["description"] = environment_description
         if env:
-            context_block = self._map_context(env)
+            context_block = self._map_context(env, context_description=context_description)
             if context_block:
                 record["context"] = context_block
 
@@ -83,7 +87,7 @@ class IsaacWriter:
             if system_block:
                 record["system"] = system_block
 
-            assets_block = self._map_assets(refl, result)
+            assets_block = self._map_assets(refl, result, raw_file_path=raw_file_path)
             if assets_block:
                 record["assets"] = assets_block
 
@@ -94,6 +98,8 @@ class IsaacWriter:
         result: AssemblyResult,
         output_path: str | Path | None = None,
         environment_description: str | None = None,
+        context_description: str | None = None,
+        raw_file_path: str | None = None,
     ) -> Path:
         """
         Write AssemblyResult as ISAAC record to JSON file.
@@ -101,12 +107,19 @@ class IsaacWriter:
         Args:
             result: Assembled data from data-assembler
             output_path: Output file path. If None, uses output_dir/isaac_record.json
-            environment_description: Optional environment description from manifest
+            environment_description: Optional environment/enum value from manifest
+            context_description: Optional free-text context from manifest
+            raw_file_path: Optional path to raw NeXus file from manifest
 
         Returns:
             Path to written file
         """
-        record = self.to_isaac(result, environment_description=environment_description)
+        record = self.to_isaac(
+            result,
+            environment_description=environment_description,
+            context_description=context_description,
+            raw_file_path=raw_file_path,
+        )
 
         if output_path:
             path = Path(output_path)
@@ -244,14 +257,17 @@ class IsaacWriter:
         if not sample:
             return None
 
-        result = {"sample_form": "thin_film"}
+        result: dict[str, Any] = {"sample_form": "film"}
 
         if sample.get("main_composition"):
+            raw_provenance = sample.get("provenance", "")
+            provenance = self._normalise_provenance(raw_provenance)
             result["material"] = {
                 "name": sample["main_composition"],
                 "formula": sample.get("formula", sample["main_composition"]),
-                "provenance": "model_fitted",
             }
+            if provenance:
+                result["material"]["provenance"] = provenance
 
         layers = sample.get("layers", [])
         if layers:
@@ -261,6 +277,31 @@ class IsaacWriter:
             }
 
         return result
+
+    # Valid provenance values per ISAAC v1 ornl-rev1 schema
+    _PROVENANCE_ENUM = frozenset({
+        "commercial", "synthesized", "theoretical", "literature", "natural",
+    })
+    _PROVENANCE_MAP: dict[str, str] = {
+        "model_fitted": "theoretical",
+        "model": "theoretical",
+        "fitted": "theoretical",
+        "simulation": "theoretical",
+        "computed": "theoretical",
+        "purchased": "commercial",
+        "bought": "commercial",
+        "grown": "synthesized",
+        "deposited": "synthesized",
+        "fabricated": "synthesized",
+    }
+
+    @classmethod
+    def _normalise_provenance(cls, raw: str) -> str:
+        """Map a free-text provenance string to the schema enum, or omit."""
+        low = raw.strip().lower()
+        if low in cls._PROVENANCE_ENUM:
+            return low
+        return cls._PROVENANCE_MAP.get(low, "")
 
     def _map_system(self, refl: dict) -> dict[str, Any] | None:
         """Map instrument configuration to ISAAC system block."""
@@ -293,16 +334,55 @@ class IsaacWriter:
             "configuration": configuration,
         }
 
-    def _map_context(self, env: dict) -> dict[str, Any] | None:
+    # Valid environment enum values per ISAAC v1 ornl-rev1 schema
+    _ENVIRONMENT_ENUM = frozenset({
+        "operando", "in_situ", "ex_situ", "in_silico",
+    })
+    _ENVIRONMENT_MAP: dict[str, str] = {
+        "in situ": "in_situ",
+        "ex situ": "ex_situ",
+        "in silico": "in_silico",
+    }
+
+    @classmethod
+    def _classify_environment(cls, description: str) -> str:
+        """Best-effort classification of a free-text environment description.
+
+        Returns one of the schema enum values.  Defaults to ``"ex_situ"``
+        when no keyword match is found.
+        """
+        low = description.strip().lower()
+        if low in cls._ENVIRONMENT_ENUM:
+            return low
+        if low in cls._ENVIRONMENT_MAP:
+            return cls._ENVIRONMENT_MAP[low]
+        # Keyword heuristics
+        if "electrochemical" in low or "operando" in low or "under bias" in low:
+            return "operando"
+        if "in situ" in low or "in_situ" in low:
+            return "in_situ"
+        if "in silico" in low or "simulat" in low:
+            return "in_silico"
+        return "ex_situ"
+
+    def _map_context(self, env: dict, context_description: str | None = None) -> dict[str, Any] | None:
         """Map environment record to ISAAC context block."""
         if not env:
             return None
 
-        # environment and temperature_K are required by the schema
+        description = env.get("description", "not specified")
+        environment_enum = self._classify_environment(description)
+
         result: dict[str, Any] = {
-            "environment": env.get("description", "not specified"),
+            "environment": environment_enum,
             "temperature_K": env.get("temperature") if env.get("temperature") is not None else 295.0,
         }
+
+        # Use explicit context_description from manifest if provided,
+        # otherwise fall back to the environment description text.
+        desc = context_description or description
+        if desc and desc != environment_enum:
+            result["description"] = desc
 
         if env.get("pressure"):
             result["pressure_Pa"] = env["pressure"]
@@ -312,11 +392,12 @@ class IsaacWriter:
 
         return result
 
-    def _map_assets(self, refl: dict, result: AssemblyResult) -> list[dict[str, Any]] | None:
+    def _map_assets(self, refl: dict, result: AssemblyResult, raw_file_path: str | None = None) -> list[dict[str, Any]] | None:
         """Map file references to ISAAC assets block."""
         assets = []
 
-        raw_file = refl.get("raw_file_path")
+        # Prefer manifest raw path, fall back to reflectivity metadata
+        raw_file = raw_file_path or refl.get("raw_file_path")
         if raw_file:
             assets.append({
                 "asset_id": "raw_nexus_file",
