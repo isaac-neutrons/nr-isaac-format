@@ -12,9 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ulid import ULID
-
 from assembler.workflow import AssemblyResult
+from ulid import ULID
 
 __all__ = ["IsaacWriter", "write_isaac_record"]
 
@@ -177,7 +176,12 @@ class IsaacWriter:
         dr = refl_data.get("dr", [])
         if dr:
             channels.append(
-                {"name": "dR", "unit": "dimensionless", "role": "quality_monitor", "values": list(dr)}
+                {
+                    "name": "dR",
+                    "unit": "dimensionless",
+                    "role": "quality_monitor",
+                    "values": list(dr),
+                }
             )
 
         dq = refl_data.get("dq", [])
@@ -203,42 +207,46 @@ class IsaacWriter:
 
         descriptors = []
         if q:
-            descriptors.extend([
-                {
-                    "name": "q_range_min",
-                    "kind": "absolute",
-                    "source": "computed",
-                    "value": min(q),
-                    "unit": "Å⁻¹",
-                    "uncertainty": {"type": "none"},
-                },
-                {
-                    "name": "q_range_max",
-                    "kind": "absolute",
-                    "source": "computed",
-                    "value": max(q),
-                    "unit": "Å⁻¹",
-                    "uncertainty": {"type": "none"},
-                },
-                {
-                    "name": "total_points",
-                    "kind": "absolute",
-                    "source": "computed",
-                    "value": len(q),
-                    "unit": "count",
-                    "uncertainty": {"type": "none"},
-                },
-            ])
+            descriptors.extend(
+                [
+                    {
+                        "name": "q_range_min",
+                        "kind": "absolute",
+                        "source": "computed",
+                        "value": min(q),
+                        "unit": "Å⁻¹",
+                        "uncertainty": {"type": "none"},
+                    },
+                    {
+                        "name": "q_range_max",
+                        "kind": "absolute",
+                        "source": "computed",
+                        "value": max(q),
+                        "unit": "Å⁻¹",
+                        "uncertainty": {"type": "none"},
+                    },
+                    {
+                        "name": "total_points",
+                        "kind": "absolute",
+                        "source": "computed",
+                        "value": len(q),
+                        "unit": "count",
+                        "uncertainty": {"type": "none"},
+                    },
+                ]
+            )
 
         geometry = refl_data.get("measurement_geometry")
         if geometry:
-            descriptors.append({
-                "name": "measurement_geometry",
-                "kind": "categorical",
-                "source": "metadata",
-                "value": geometry,
-                "uncertainty": {"type": "none"},
-            })
+            descriptors.append(
+                {
+                    "name": "measurement_geometry",
+                    "kind": "categorical",
+                    "source": "metadata",
+                    "value": geometry,
+                    "uncertainty": {"type": "none"},
+                }
+            )
 
         return {
             "policy": {"requires_at_least_one": True},
@@ -279,9 +287,15 @@ class IsaacWriter:
         return result
 
     # Valid provenance values per ISAAC v1 ornl-rev1 schema
-    _PROVENANCE_ENUM = frozenset({
-        "commercial", "synthesized", "theoretical", "literature", "natural",
-    })
+    _PROVENANCE_ENUM = frozenset(
+        {
+            "commercial",
+            "synthesized",
+            "theoretical",
+            "literature",
+            "natural",
+        }
+    )
     _PROVENANCE_MAP: dict[str, str] = {
         "model_fitted": "theoretical",
         "model": "theoretical",
@@ -335,9 +349,14 @@ class IsaacWriter:
         }
 
     # Valid environment enum values per ISAAC v1 ornl-rev1 schema
-    _ENVIRONMENT_ENUM = frozenset({
-        "operando", "in_situ", "ex_situ", "in_silico",
-    })
+    _ENVIRONMENT_ENUM = frozenset(
+        {
+            "operando",
+            "in_situ",
+            "ex_situ",
+            "in_silico",
+        }
+    )
     _ENVIRONMENT_MAP: dict[str, str] = {
         "in situ": "in_situ",
         "ex situ": "ex_situ",
@@ -365,7 +384,9 @@ class IsaacWriter:
             return "in_silico"
         return "ex_situ"
 
-    def _map_context(self, env: dict, context_description: str | None = None) -> dict[str, Any] | None:
+    def _map_context(
+        self, env: dict, context_description: str | None = None
+    ) -> dict[str, Any] | None:
         """Map environment record to ISAAC context block."""
         if not env:
             return None
@@ -375,7 +396,9 @@ class IsaacWriter:
 
         result: dict[str, Any] = {
             "environment": environment_enum,
-            "temperature_K": env.get("temperature") if env.get("temperature") is not None else 295.0,
+            "temperature_K": env.get("temperature")
+            if env.get("temperature") is not None
+            else 295.0,
         }
 
         # Use explicit context_description from manifest if provided,
@@ -392,27 +415,33 @@ class IsaacWriter:
 
         return result
 
-    def _map_assets(self, refl: dict, result: AssemblyResult, raw_file_path: str | None = None) -> list[dict[str, Any]] | None:
+    def _map_assets(
+        self, refl: dict, result: AssemblyResult, raw_file_path: str | None = None
+    ) -> list[dict[str, Any]] | None:
         """Map file references to ISAAC assets block."""
         assets = []
 
         # Prefer manifest raw path, fall back to reflectivity metadata
         raw_file = raw_file_path or refl.get("raw_file_path")
         if raw_file:
-            assets.append({
-                "asset_id": "raw_nexus_file",
-                "content_role": "raw_data_pointer",
-                "uri": str(raw_file),
-                "sha256": self._file_sha256(raw_file),
-            })
+            assets.append(
+                {
+                    "asset_id": "raw_nexus_file",
+                    "content_role": "raw_data_pointer",
+                    "uri": str(raw_file),
+                    "sha256": self._file_sha256(raw_file),
+                }
+            )
 
         if result.reduced_file:
-            assets.append({
-                "asset_id": "reduced_data",
-                "content_role": "reduction_product",
-                "uri": str(result.reduced_file),
-                "sha256": self._file_sha256(result.reduced_file),
-            })
+            assets.append(
+                {
+                    "asset_id": "reduced_data",
+                    "content_role": "reduction_product",
+                    "uri": str(result.reduced_file),
+                    "sha256": self._file_sha256(result.reduced_file),
+                }
+            )
 
         return assets if assets else None
 

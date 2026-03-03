@@ -117,9 +117,7 @@ class IsaacClient:
         self._check_response(resp)
         return resp.json()
 
-    def list_records(
-        self, *, limit: int = 100, offset: int = 0
-    ) -> list[dict[str, Any]]:
+    def list_records(self, *, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         """List record summaries.
 
         Args:
@@ -164,9 +162,7 @@ class IsaacClient:
 
     # -- helpers --------------------------------------------------------------
 
-    def _check_response(
-        self, resp: httpx.Response, *, allow_400: bool = False
-    ) -> None:
+    def _check_response(self, resp: httpx.Response, *, allow_400: bool = False) -> None:
         """Raise typed exceptions for non-success status codes."""
         if resp.status_code in (401, 403):
             detail = self._extract_detail(resp)

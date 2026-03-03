@@ -65,11 +65,10 @@ def convert(manifest: Path, compact: bool, dry_run: bool) -> None:
             model_dataset_index: 1           # optional
             environment: "Description text"  # optional
     """
+    import yaml
     from assembler.parsers import ManifestParser, ModelParser, ParquetParser, ReducedParser
     from assembler.tools.detection import extract_run_number
     from assembler.workflow import DataAssembler
-
-    import yaml
 
     # Parse manifest
     parser = ManifestParser()
@@ -133,9 +132,7 @@ def convert(manifest: Path, compact: bool, dry_run: bool) -> None:
                     measurement.parquet, run_number=run_number
                 )
             except Exception as e:
-                click.echo(
-                    click.style(f"  Error parsing parquet files: {e}", fg="red"), err=True
-                )
+                click.echo(click.style(f"  Error parsing parquet files: {e}", fg="red"), err=True)
                 sys.exit(1)
 
         # Parse model (optional, measurement-level overrides sample-level)
@@ -149,9 +146,7 @@ def convert(manifest: Path, compact: bool, dry_run: bool) -> None:
             try:
                 model_data = model_parser.parse(model_file, dataset_index=ds_index)
             except Exception as e:
-                click.echo(
-                    click.style(f"  Error parsing model file: {e}", fg="red"), err=True
-                )
+                click.echo(click.style(f"  Error parsing model file: {e}", fg="red"), err=True)
                 sys.exit(1)
 
         # Assemble via data-assembler
@@ -178,8 +173,7 @@ def convert(manifest: Path, compact: bool, dry_run: bool) -> None:
             if manifest_data.sample.description:
                 result.sample["description"] = manifest_data.sample.description
             click.echo(
-                f"  Sample: {result.sample.get('description', 'unknown')} "
-                f"({sample_id[:8]}...)"
+                f"  Sample: {result.sample.get('description', 'unknown')} ({sample_id[:8]}...)"
             )
         elif sample_id:
             click.echo(f"  Sample: {sample_id[:8]}... (reused)")
@@ -285,9 +279,8 @@ def validate(file: Path) -> None:
 # Helper: resolve ISAAC credentials from env / options
 # ---------------------------------------------------------------------------
 
-def _resolve_credentials(
-    url: Optional[str], token: Optional[str]
-) -> tuple[str, str]:
+
+def _resolve_credentials(url: Optional[str], token: Optional[str]) -> tuple[str, str]:
     """Return (base_url, api_token), loading .env if needed."""
     load_dotenv()  # loads .env from cwd (or parents) if present
 
@@ -338,6 +331,7 @@ def _collect_json_files(paths: tuple[str, ...]) -> list[Path]:
 # push command
 # ---------------------------------------------------------------------------
 
+
 @main.command()
 @click.argument("paths", nargs=-1, required=True)
 @click.option(
@@ -347,7 +341,9 @@ def _collect_json_files(paths: tuple[str, ...]) -> list[Path]:
 )
 @click.option("--url", default=None, help="Override ISAAC_URL from .env.")
 @click.option("--token", default=None, help="Override ISAAC_KEY from .env.")
-def push(paths: tuple[str, ...], validate_only: bool, url: Optional[str], token: Optional[str]) -> None:
+def push(
+    paths: tuple[str, ...], validate_only: bool, url: Optional[str], token: Optional[str]
+) -> None:
     """Push ISAAC record JSON files to the ISAAC Portal API.
 
     PATHS can be one or more JSON files or directories containing JSON files.
@@ -439,7 +435,9 @@ def push(paths: tuple[str, ...], validate_only: bool, url: Optional[str], token:
         click.echo(click.style(f"All {succeeded} record(s) {action} successfully.", fg="green"))
     else:
         click.echo(
-            click.style(f"{succeeded} succeeded, {failed} failed.", fg="yellow" if succeeded else "red")
+            click.style(
+                f"{succeeded} succeeded, {failed} failed.", fg="yellow" if succeeded else "red"
+            )
         )
         sys.exit(1)
 
@@ -447,6 +445,7 @@ def push(paths: tuple[str, ...], validate_only: bool, url: Optional[str], token:
 # ---------------------------------------------------------------------------
 # health command
 # ---------------------------------------------------------------------------
+
 
 @main.command()
 @click.option("--url", default=None, help="Override ISAAC_URL from .env.")
@@ -473,6 +472,7 @@ def health(url: Optional[str], token: Optional[str]) -> None:
 # ---------------------------------------------------------------------------
 # fetch-schema command
 # ---------------------------------------------------------------------------
+
 
 def _extract_schema_version(schema: dict) -> str:
     """Extract the major schema version number from a schema dict.
@@ -509,9 +509,7 @@ def _next_revision(schema_dir: Path, version: str) -> int:
     """
     import re
 
-    pattern = re.compile(
-        rf"^isaac_record_v{re.escape(version)}-ornl-rev(\d+)\.json$"
-    )
+    pattern = re.compile(rf"^isaac_record_v{re.escape(version)}-ornl-rev(\d+)\.json$")
     max_rev = 0
     if schema_dir.is_dir():
         for f in schema_dir.iterdir():
