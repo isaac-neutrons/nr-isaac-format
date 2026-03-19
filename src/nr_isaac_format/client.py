@@ -160,6 +160,19 @@ class IsaacClient:
         self._check_response(resp)
         return resp.json()
 
+    def get_ontology(self) -> dict[str, Any]:
+        """Retrieve the ISAAC ontology vocabulary.
+
+        Returns:
+            The ontology dictionary.
+
+        Raises:
+            IsaacAPIError: If the ontology endpoint returns a non-200 status.
+        """
+        resp = self._client.get(f"{self.base_url}/ontology")
+        self._check_response(resp)
+        return resp.json()
+
     # -- helpers --------------------------------------------------------------
 
     def _check_response(self, resp: httpx.Response, *, allow_400: bool = False) -> None:

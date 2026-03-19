@@ -66,11 +66,9 @@ class TestIsaacWriter:
         writer = IsaacWriter()
         record = writer.to_isaac(result)
 
-        # Check acquisition_source
-        acq = record["acquisition_source"]
-        assert acq["source_type"] == "facility"
-        assert acq["facility"]["site"] == "SNS"
-        assert acq["facility"]["beamline"] == "REF_L"
+        # Check source_type (rev2: top-level, replaces acquisition_source)
+        assert record["source_type"] == "facility"
+        assert "acquisition_source" not in record
 
         # Check measurement
         meas = record["measurement"]
@@ -94,9 +92,10 @@ class TestIsaacWriter:
         assert "q_range_max" in names
         assert "total_points" in names
         assert "measurement_geometry" in names
-        # All descriptors must have uncertainty
+        # All descriptors must have uncertainty and valid source
         for d in descriptors:
             assert "uncertainty" in d
+            assert d["source"] in ("auto", "manual", "imported")
 
     def test_with_sample_data(self):
         """Should map sample data when present."""
@@ -201,8 +200,8 @@ class TestIsaacWriter:
         assert ctx["temperature_K"] == 295.0  # default
         assert ctx["environment"] == "ex_situ"  # default classification
 
-    def test_system_includes_configuration(self):
-        """Should include required configuration block in system."""
+    def test_system_includes_technique(self):
+        """Should include required technique field in system block."""
         result = create_mock_result(
             reflectivity={
                 "facility": "SNS",
@@ -215,8 +214,8 @@ class TestIsaacWriter:
         record = writer.to_isaac(result)
 
         assert "system" in record
-        assert "configuration" in record["system"]
-        assert record["system"]["configuration"]["measurement_geometry"] == "front reflection"
+        assert record["system"]["technique"] == "neutron_reflectometry"
+        assert record["system"]["domain"] == "experimental"
 
     def test_with_environment_description_no_env_record(self):
         """Should create context block from manifest environment_description."""
@@ -355,3 +354,50 @@ class TestConvenienceFunction:
         with open(path) as f:
             record = json.load(f)
         assert "record_id" in record
+
+
+class TestMaterialName:
+    """Tests for material_name override from manifest."""
+
+    def test_material_name_creates_sample_when_no_sample(self):
+        """Should create sample block from material_name when result.sample is None."""
+        result = create_mock_result(reflectivity={"facility": "SNS"})
+        writer = IsaacWriter()
+        record = writer.to_isaac(result, material_name="THF | CuOx | Cu | Ti | Si")
+
+        assert "sample" in record
+        assert record["sample"]["sample_form"] == "film"
+        assert record["sample"]["material"]["name"] == "THF | CuOx | Cu | Ti | Si"
+        assert record["sample"]["material"]["formula"] == "THF | CuOx | Cu | Ti | Si"
+
+    def test_material_name_overrides_unknown(self):
+        """Should replace 'Unknown' material name with manifest material_name."""
+        result = create_mock_result(
+            reflectivity={"facility": "SNS"},
+            sample={"main_composition": "Unknown", "layers": []},
+        )
+        writer = IsaacWriter()
+        record = writer.to_isaac(result, material_name="THF | CuOx | Cu | Ti | Si")
+
+        assert record["sample"]["material"]["name"] == "THF | CuOx | Cu | Ti | Si"
+        assert record["sample"]["material"]["formula"] == "THF | CuOx | Cu | Ti | Si"
+
+    def test_material_name_does_not_override_valid(self):
+        """Should NOT override an existing valid material name."""
+        result = create_mock_result(
+            reflectivity={"facility": "SNS"},
+            sample={"main_composition": "Fe/Si", "layers": []},
+        )
+        writer = IsaacWriter()
+        record = writer.to_isaac(result, material_name="THF | CuOx | Cu | Ti | Si")
+
+        # Original composition wins
+        assert record["sample"]["material"]["name"] == "Fe/Si"
+
+    def test_material_name_none_no_effect(self):
+        """Should not create sample block when material_name is None and no sample."""
+        result = create_mock_result(reflectivity={"facility": "SNS"})
+        writer = IsaacWriter()
+        record = writer.to_isaac(result, material_name=None)
+
+        assert "sample" not in record

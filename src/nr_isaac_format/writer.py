@@ -17,6 +17,9 @@ from ulid import ULID
 
 __all__ = ["IsaacWriter", "write_isaac_record"]
 
+# Schema revision this writer targets. Bump when updating for a new schema.
+SCHEMA_REVISION = "v1-ornl-rev2"
+
 
 class IsaacWriter:
     """Writer for ISAAC AI-Ready Record v1.0 format."""
@@ -38,6 +41,8 @@ class IsaacWriter:
         environment_description: str | None = None,
         context_description: str | None = None,
         raw_file_path: str | None = None,
+        material_name: str | None = None,
+        record_id: str | None = None,
     ) -> dict[str, Any]:
         """
         Convert AssemblyResult to ISAAC AI-Ready Record format.
@@ -47,6 +52,8 @@ class IsaacWriter:
             environment_description: Optional environment/enum value from manifest
             context_description: Optional free-text context description from manifest
             raw_file_path: Optional path to raw NeXus file from manifest
+            material_name: Optional material name from manifest (e.g. "THF | CuOx | Cu | Ti | Si")
+            record_id: Optional record ID to reuse (preserves identity across updates)
 
         Returns:
             ISAAC record as a dictionary
@@ -57,20 +64,25 @@ class IsaacWriter:
 
         record = {
             "isaac_record_version": "1.0",
-            "record_id": str(ULID()).upper(),
+            "record_id": record_id or str(ULID()).upper(),
             "record_type": "evidence",
             "record_domain": "characterization",
+            "source_type": "facility",
             "timestamps": self._map_timestamps(refl, now),
-            "acquisition_source": self._map_acquisition_source(refl),
             "measurement": self._map_measurement(refl_data),
             "descriptors": self._map_descriptors(refl_data, now),
         }
 
         # Optional blocks
         if result.sample:
-            sample_block = self._map_sample(result.sample)
+            sample_block = self._map_sample(result.sample, material_name=material_name)
             if sample_block:
                 record["sample"] = sample_block
+        elif material_name:
+            record["sample"] = {
+                "sample_form": "film",
+                "material": {"name": material_name, "formula": material_name},
+            }
 
         # Build context from environment record and/or manifest description
         env = result.environment or {}
@@ -99,6 +111,8 @@ class IsaacWriter:
         environment_description: str | None = None,
         context_description: str | None = None,
         raw_file_path: str | None = None,
+        material_name: str | None = None,
+        record_id: str | None = None,
     ) -> Path:
         """
         Write AssemblyResult as ISAAC record to JSON file.
@@ -109,6 +123,8 @@ class IsaacWriter:
             environment_description: Optional environment/enum value from manifest
             context_description: Optional free-text context from manifest
             raw_file_path: Optional path to raw NeXus file from manifest
+            material_name: Optional material name from manifest
+            record_id: Optional record ID to reuse (preserves identity across updates)
 
         Returns:
             Path to written file
@@ -118,6 +134,8 @@ class IsaacWriter:
             environment_description=environment_description,
             context_description=context_description,
             raw_file_path=raw_file_path,
+            material_name=material_name,
+            record_id=record_id,
         )
 
         if output_path:
@@ -149,17 +167,6 @@ class IsaacWriter:
                 ts["acquired_start_utc"] = run_start
 
         return ts
-
-    def _map_acquisition_source(self, refl: dict) -> dict[str, Any]:
-        """Map facility/instrument info to acquisition_source block."""
-        return {
-            "source_type": "facility",
-            "facility": {
-                "site": refl.get("facility", "unknown"),
-                "beamline": refl.get("instrument_name", "unknown"),
-                "endstation": "reflectometer",
-            },
-        }
 
     def _map_measurement(self, refl_data: dict) -> dict[str, Any] | None:
         """Map Q/R/dR/dQ arrays to measurement series/channels."""
@@ -212,7 +219,7 @@ class IsaacWriter:
                     {
                         "name": "q_range_min",
                         "kind": "absolute",
-                        "source": "computed",
+                        "source": "auto",
                         "value": min(q),
                         "unit": "Å⁻¹",
                         "uncertainty": {"type": "none"},
@@ -220,7 +227,7 @@ class IsaacWriter:
                     {
                         "name": "q_range_max",
                         "kind": "absolute",
-                        "source": "computed",
+                        "source": "auto",
                         "value": max(q),
                         "unit": "Å⁻¹",
                         "uncertainty": {"type": "none"},
@@ -228,7 +235,7 @@ class IsaacWriter:
                     {
                         "name": "total_points",
                         "kind": "absolute",
-                        "source": "computed",
+                        "source": "auto",
                         "value": len(q),
                         "unit": "count",
                         "uncertainty": {"type": "none"},
@@ -242,7 +249,7 @@ class IsaacWriter:
                 {
                     "name": "measurement_geometry",
                     "kind": "categorical",
-                    "source": "metadata",
+                    "source": "auto",
                     "value": geometry,
                     "uncertainty": {"type": "none"},
                 }
@@ -260,19 +267,25 @@ class IsaacWriter:
             ],
         }
 
-    def _map_sample(self, sample: dict) -> dict[str, Any] | None:
+    def _map_sample(
+        self, sample: dict, material_name: str | None = None
+    ) -> dict[str, Any] | None:
         """Map sample record to ISAAC sample block."""
         if not sample:
             return None
 
         result: dict[str, Any] = {"sample_form": "film"}
 
-        if sample.get("main_composition"):
+        composition = sample.get("main_composition")
+        # Use manifest material_name when assembler composition is missing or unknown
+        if (not composition or composition == "Unknown") and material_name:
+            result["material"] = {"name": material_name, "formula": material_name}
+        elif composition:
             raw_provenance = sample.get("provenance", "")
             provenance = self._normalise_provenance(raw_provenance)
             result["material"] = {
-                "name": sample["main_composition"],
-                "formula": sample.get("formula", sample["main_composition"]),
+                "name": composition,
+                "formula": sample.get("formula", composition),
             }
             if provenance:
                 result["material"]["provenance"] = provenance
@@ -325,18 +338,9 @@ class IsaacWriter:
         if not facility and not instrument:
             return None
 
-        # Build flat configuration from reflectivity metadata
-        refl_data = refl.get("reflectivity", {})
-        configuration: dict[str, str | int | float | bool] = {}
-        if refl_data.get("measurement_geometry"):
-            configuration["measurement_geometry"] = refl_data["measurement_geometry"]
-        if refl_data.get("probe"):
-            configuration["probe"] = refl_data["probe"]
-        if not configuration:
-            configuration["technique"] = "neutron_reflectometry"
-
-        return {
+        result: dict[str, Any] = {
             "domain": "experimental",
+            "technique": "neutron_reflectometry",
             "instrument": {
                 "instrument_type": "beamline_endstation",
                 "instrument_name": instrument or "unknown",
@@ -345,8 +349,9 @@ class IsaacWriter:
                 "facility_name": facility or "unknown",
                 "beamline": instrument,
             },
-            "configuration": configuration,
         }
+
+        return result
 
     # Valid environment enum values per ISAAC v1 ornl-rev1 schema
     _ENVIRONMENT_ENUM = frozenset(
