@@ -41,7 +41,8 @@ class IsaacWriter:
         environment_description: str | None = None,
         context_description: str | None = None,
         raw_file_path: str | None = None,
-        material_name: str | None = None,
+        sample_name: str | None = None,
+        sample_formula: str | None = None,
         record_id: str | None = None,
     ) -> dict[str, Any]:
         """
@@ -52,7 +53,8 @@ class IsaacWriter:
             environment_description: Optional environment/enum value from manifest
             context_description: Optional free-text context description from manifest
             raw_file_path: Optional path to raw NeXus file from manifest
-            material_name: Optional material name from manifest (e.g. "THF | CuOx | Cu | Ti | Si")
+            sample_name: Sample name from manifest ``sample.description``
+            sample_formula: Sample formula from manifest ``sample.material``
             record_id: Optional record ID to reuse (preserves identity across updates)
 
         Returns:
@@ -75,13 +77,18 @@ class IsaacWriter:
 
         # Optional blocks
         if result.sample:
-            sample_block = self._map_sample(result.sample, material_name=material_name)
+            sample_block = self._map_sample(
+                result.sample, sample_name=sample_name, sample_formula=sample_formula,
+            )
             if sample_block:
                 record["sample"] = sample_block
-        elif material_name:
+        elif sample_name or sample_formula:
             record["sample"] = {
                 "sample_form": "film",
-                "material": {"name": material_name, "formula": material_name},
+                "material": {
+                    "name": sample_name or sample_formula,
+                    "formula": sample_formula or sample_name,
+                },
             }
 
         # Build context from environment record and/or manifest description
@@ -111,7 +118,8 @@ class IsaacWriter:
         environment_description: str | None = None,
         context_description: str | None = None,
         raw_file_path: str | None = None,
-        material_name: str | None = None,
+        sample_name: str | None = None,
+        sample_formula: str | None = None,
         record_id: str | None = None,
     ) -> Path:
         """
@@ -123,7 +131,8 @@ class IsaacWriter:
             environment_description: Optional environment/enum value from manifest
             context_description: Optional free-text context from manifest
             raw_file_path: Optional path to raw NeXus file from manifest
-            material_name: Optional material name from manifest
+            sample_name: Sample name from manifest ``sample.description``
+            sample_formula: Sample formula from manifest ``sample.material``
             record_id: Optional record ID to reuse (preserves identity across updates)
 
         Returns:
@@ -134,7 +143,8 @@ class IsaacWriter:
             environment_description=environment_description,
             context_description=context_description,
             raw_file_path=raw_file_path,
-            material_name=material_name,
+            sample_name=sample_name,
+            sample_formula=sample_formula,
             record_id=record_id,
         )
 
@@ -268,7 +278,10 @@ class IsaacWriter:
         }
 
     def _map_sample(
-        self, sample: dict, material_name: str | None = None
+        self,
+        sample: dict,
+        sample_name: str | None = None,
+        sample_formula: str | None = None,
     ) -> dict[str, Any] | None:
         """Map sample record to ISAAC sample block."""
         if not sample:
@@ -277,9 +290,12 @@ class IsaacWriter:
         result: dict[str, Any] = {"sample_form": "film"}
 
         composition = sample.get("main_composition")
-        # Use manifest material_name when assembler composition is missing or unknown
-        if (not composition or composition == "Unknown") and material_name:
-            result["material"] = {"name": material_name, "formula": material_name}
+        # Use manifest sample info when assembler composition is missing or unknown
+        if (not composition or composition == "Unknown") and (sample_name or sample_formula):
+            result["material"] = {
+                "name": sample_name or sample_formula,
+                "formula": sample_formula or sample_name,
+            }
         elif composition:
             raw_provenance = sample.get("provenance", "")
             provenance = self._normalise_provenance(raw_provenance)

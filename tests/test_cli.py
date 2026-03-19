@@ -306,11 +306,11 @@ class TestUpdateCommand:
 title: "Test Experiment"
 sample:
   description: "Cu in THF on Si"
+  material: "THF | CuOx | Cu | Ti | Si"
 output: {out}
 measurements:
   - name: "Steady-state OCV"
     reduced: /fake/REFL_218386_reduced_data.txt
-    material: "THF | CuOx | Cu | Ti | Si"
     context: "Test context"
 """
         )
@@ -468,7 +468,8 @@ measurements:
         # Verify to_isaac was called with the preserved record_id
         call_kwargs = MockWriter.return_value.to_isaac.call_args
         assert call_kwargs.kwargs["record_id"] == "01HXYZ_ORIGINAL_ID"
-        assert call_kwargs.kwargs["material_name"] == "THF | CuOx | Cu | Ti | Si"
+        assert call_kwargs.kwargs["sample_name"] == "Cu in THF on Si"
+        assert call_kwargs.kwargs["sample_formula"] == "THF | CuOx | Cu | Ti | Si"
         assert call_kwargs.kwargs["context_description"] == "Test context"
 
     def test_update_dry_run(self, runner, tmp_path):

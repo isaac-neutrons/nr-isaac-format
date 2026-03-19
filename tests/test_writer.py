@@ -356,48 +356,72 @@ class TestConvenienceFunction:
         assert "record_id" in record
 
 
-class TestMaterialName:
-    """Tests for material_name override from manifest."""
+class TestSampleFromManifest:
+    """Tests for sample_name / sample_formula override from manifest."""
 
-    def test_material_name_creates_sample_when_no_sample(self):
-        """Should create sample block from material_name when result.sample is None."""
+    def test_creates_sample_when_no_assembler_sample(self):
+        """Should create sample block from manifest fields when result.sample is None."""
         result = create_mock_result(reflectivity={"facility": "SNS"})
         writer = IsaacWriter()
-        record = writer.to_isaac(result, material_name="THF | CuOx | Cu | Ti | Si")
+        record = writer.to_isaac(
+            result, sample_name="Cu in THF on Si", sample_formula="THF | CuOx | Cu | Ti | Si"
+        )
 
         assert "sample" in record
         assert record["sample"]["sample_form"] == "film"
-        assert record["sample"]["material"]["name"] == "THF | CuOx | Cu | Ti | Si"
+        assert record["sample"]["material"]["name"] == "Cu in THF on Si"
         assert record["sample"]["material"]["formula"] == "THF | CuOx | Cu | Ti | Si"
 
-    def test_material_name_overrides_unknown(self):
-        """Should replace 'Unknown' material name with manifest material_name."""
+    def test_overrides_unknown_composition(self):
+        """Should replace 'Unknown' composition with manifest fields."""
         result = create_mock_result(
             reflectivity={"facility": "SNS"},
             sample={"main_composition": "Unknown", "layers": []},
         )
         writer = IsaacWriter()
-        record = writer.to_isaac(result, material_name="THF | CuOx | Cu | Ti | Si")
+        record = writer.to_isaac(
+            result, sample_name="Cu in THF on Si", sample_formula="THF | CuOx | Cu | Ti | Si"
+        )
 
-        assert record["sample"]["material"]["name"] == "THF | CuOx | Cu | Ti | Si"
+        assert record["sample"]["material"]["name"] == "Cu in THF on Si"
         assert record["sample"]["material"]["formula"] == "THF | CuOx | Cu | Ti | Si"
 
-    def test_material_name_does_not_override_valid(self):
-        """Should NOT override an existing valid material name."""
+    def test_does_not_override_valid_composition(self):
+        """Should NOT override an existing valid material from the assembler."""
         result = create_mock_result(
             reflectivity={"facility": "SNS"},
             sample={"main_composition": "Fe/Si", "layers": []},
         )
         writer = IsaacWriter()
-        record = writer.to_isaac(result, material_name="THF | CuOx | Cu | Ti | Si")
+        record = writer.to_isaac(
+            result, sample_name="Cu in THF on Si", sample_formula="THF | CuOx | Cu | Ti | Si"
+        )
 
-        # Original composition wins
+        # Assembler composition wins
         assert record["sample"]["material"]["name"] == "Fe/Si"
 
-    def test_material_name_none_no_effect(self):
-        """Should not create sample block when material_name is None and no sample."""
+    def test_no_manifest_fields_no_sample(self):
+        """Should not create sample block when no manifest sample fields and no assembler sample."""
         result = create_mock_result(reflectivity={"facility": "SNS"})
         writer = IsaacWriter()
-        record = writer.to_isaac(result, material_name=None)
+        record = writer.to_isaac(result, sample_name=None, sample_formula=None)
 
         assert "sample" not in record
+
+    def test_name_only_uses_name_for_both(self):
+        """When only sample_name is given, use it for both name and formula."""
+        result = create_mock_result(reflectivity={"facility": "SNS"})
+        writer = IsaacWriter()
+        record = writer.to_isaac(result, sample_name="Cu in THF on Si")
+
+        assert record["sample"]["material"]["name"] == "Cu in THF on Si"
+        assert record["sample"]["material"]["formula"] == "Cu in THF on Si"
+
+    def test_formula_only_uses_formula_for_both(self):
+        """When only sample_formula is given, use it for both name and formula."""
+        result = create_mock_result(reflectivity={"facility": "SNS"})
+        writer = IsaacWriter()
+        record = writer.to_isaac(result, sample_formula="THF | CuOx | Cu | Ti | Si")
+
+        assert record["sample"]["material"]["name"] == "THF | CuOx | Cu | Ti | Si"
+        assert record["sample"]["material"]["formula"] == "THF | CuOx | Cu | Ti | Si"

@@ -104,6 +104,11 @@ def convert(manifest: Path, compact: bool, dry_run: bool) -> None:
     model_parser = ModelParser()
     assembler = DataAssembler()
 
+    # Sample-level fields from raw YAML
+    raw_sample = raw_yaml.get("sample", {})
+    sample_name: str | None = raw_sample.get("description")
+    sample_formula: str | None = raw_sample.get("material")
+
     sample_id: Optional[str] = None
     written_files: list[Path] = []
 
@@ -115,7 +120,6 @@ def convert(manifest: Path, compact: bool, dry_run: bool) -> None:
         raw_m = raw_measurements[i] if i < len(raw_measurements) else {}
         m_context: str | None = raw_m.get("context")
         m_raw: str | None = raw_m.get("raw")
-        m_material: str | None = raw_m.get("material")
 
         # Parse reduced data (required)
         try:
@@ -192,7 +196,8 @@ def convert(manifest: Path, compact: bool, dry_run: bool) -> None:
             environment_description=measurement.environment,
             context_description=m_context,
             raw_file_path=m_raw,
-            material_name=m_material,
+            sample_name=sample_name,
+            sample_formula=sample_formula,
         )
 
         if dry_run:
@@ -844,6 +849,11 @@ def update(manifest: Path, compact: bool, dry_run: bool) -> None:
     model_parser = ModelParser()
     assembler = DataAssembler()
 
+    # Sample-level fields from raw YAML
+    raw_sample = raw_yaml.get("sample", {})
+    sample_name: str | None = raw_sample.get("description")
+    sample_formula: str | None = raw_sample.get("material")
+
     sample_id: Optional[str] = None
     written_files: list[Path] = []
 
@@ -855,7 +865,6 @@ def update(manifest: Path, compact: bool, dry_run: bool) -> None:
         raw_m = raw_measurements[i] if i < len(raw_measurements) else {}
         m_context: str | None = raw_m.get("context")
         m_raw: str | None = raw_m.get("raw")
-        m_material: str | None = raw_m.get("material")
 
         # Parse reduced data (required)
         try:
@@ -946,7 +955,8 @@ def update(manifest: Path, compact: bool, dry_run: bool) -> None:
             environment_description=measurement.environment,
             context_description=m_context,
             raw_file_path=m_raw,
-            material_name=m_material,
+            sample_name=sample_name,
+            sample_formula=sample_formula,
             record_id=existing_id,
         )
 
