@@ -184,9 +184,9 @@ def convert(manifest: Path, compact: bool, dry_run: bool) -> None:
             click.echo(f"  Sample: {sample_id[:8]}... (reused)")
 
         if result.reflectivity:
-            refl_data = result.reflectivity.get("reflectivity", {})
+            refl_data = result.reflectivity
             q = refl_data.get("q", [])
-            run_number = result.reflectivity.get("run_number")
+            run_number = refl_data.get("run_number")
             click.echo(f"  Reflectivity: run {run_number}, {len(q)} Q points")
 
         # Write ISAAC record
