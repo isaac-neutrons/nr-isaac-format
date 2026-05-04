@@ -1,7 +1,6 @@
 """Tests for the manifest-driven CLI."""
 
 import json
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -383,14 +382,14 @@ measurements:
         mock_manifest_data, mock_result = self._setup_mocks(output_dir, run_number=218386)
 
         with (
-            patch("assembler.parsers.ManifestParser") as MockParser,
+            patch("assembler.parsers.ManifestParser") as mock_parser,
             patch("assembler.parsers.ReducedParser"),
-            patch("assembler.workflow.DataAssembler") as MockAssembler,
-            patch("nr_isaac_format.cli.IsaacWriter") as MockWriter,
+            patch("assembler.workflow.DataAssembler") as mock_assembler,
+            patch("nr_isaac_format.cli.IsaacWriter") as mock_writer,
         ):
-            MockParser.return_value.parse.return_value = mock_manifest_data
-            MockAssembler.return_value.assemble.return_value = mock_result
-            MockWriter.return_value.to_isaac.side_effect = self._mock_to_isaac
+            mock_parser.return_value.parse.return_value = mock_manifest_data
+            mock_assembler.return_value.assemble.return_value = mock_result
+            mock_writer.return_value.to_isaac.side_effect = self._mock_to_isaac
 
             result = runner.invoke(main, ["update", str(manifest)])
 
@@ -409,14 +408,14 @@ measurements:
         mock_manifest_data, mock_result = self._setup_mocks(output_dir, run_number=218386)
 
         with (
-            patch("assembler.parsers.ManifestParser") as MockParser,
+            patch("assembler.parsers.ManifestParser") as mock_parser,
             patch("assembler.parsers.ReducedParser"),
-            patch("assembler.workflow.DataAssembler") as MockAssembler,
-            patch("nr_isaac_format.cli.IsaacWriter") as MockWriter,
+            patch("assembler.workflow.DataAssembler") as mock_assembler,
+            patch("nr_isaac_format.cli.IsaacWriter") as mock_writer,
         ):
-            MockParser.return_value.parse.return_value = mock_manifest_data
-            MockAssembler.return_value.assemble.return_value = mock_result
-            MockWriter.return_value.to_isaac.side_effect = self._mock_to_isaac
+            mock_parser.return_value.parse.return_value = mock_manifest_data
+            mock_assembler.return_value.assemble.return_value = mock_result
+            mock_writer.return_value.to_isaac.side_effect = self._mock_to_isaac
 
             result = runner.invoke(main, ["update", str(manifest)])
 
@@ -436,14 +435,14 @@ measurements:
         mock_manifest_data, mock_result = self._setup_mocks(output_dir, run_number=218386)
 
         with (
-            patch("assembler.parsers.ManifestParser") as MockParser,
+            patch("assembler.parsers.ManifestParser") as mock_parser,
             patch("assembler.parsers.ReducedParser"),
-            patch("assembler.workflow.DataAssembler") as MockAssembler,
-            patch("nr_isaac_format.cli.IsaacWriter") as MockWriter,
+            patch("assembler.workflow.DataAssembler") as mock_assembler,
+            patch("nr_isaac_format.cli.IsaacWriter") as mock_writer,
         ):
-            MockParser.return_value.parse.return_value = mock_manifest_data
-            MockAssembler.return_value.assemble.return_value = mock_result
-            MockWriter.return_value.to_isaac.side_effect = self._mock_to_isaac
+            mock_parser.return_value.parse.return_value = mock_manifest_data
+            mock_assembler.return_value.assemble.return_value = mock_result
+            mock_writer.return_value.to_isaac.side_effect = self._mock_to_isaac
 
             result = runner.invoke(main, ["update", str(manifest)])
 
@@ -458,19 +457,19 @@ measurements:
         mock_manifest_data, mock_result = self._setup_mocks(output_dir, run_number=218386)
 
         with (
-            patch("assembler.parsers.ManifestParser") as MockParser,
+            patch("assembler.parsers.ManifestParser") as mock_parser,
             patch("assembler.parsers.ReducedParser"),
-            patch("assembler.workflow.DataAssembler") as MockAssembler,
-            patch("nr_isaac_format.cli.IsaacWriter") as MockWriter,
+            patch("assembler.workflow.DataAssembler") as mock_assembler,
+            patch("nr_isaac_format.cli.IsaacWriter") as mock_writer,
         ):
-            MockParser.return_value.parse.return_value = mock_manifest_data
-            MockAssembler.return_value.assemble.return_value = mock_result
-            MockWriter.return_value.to_isaac.side_effect = self._mock_to_isaac
+            mock_parser.return_value.parse.return_value = mock_manifest_data
+            mock_assembler.return_value.assemble.return_value = mock_result
+            mock_writer.return_value.to_isaac.side_effect = self._mock_to_isaac
 
             runner.invoke(main, ["update", str(manifest)])
 
         # Verify to_isaac was called with the preserved record_id
-        call_kwargs = MockWriter.return_value.to_isaac.call_args
+        call_kwargs = mock_writer.return_value.to_isaac.call_args
         assert call_kwargs.kwargs["record_id"] == "01HXYZ_ORIGINAL_ID"
         assert call_kwargs.kwargs["sample_name"] == "Cu in THF on Si"
         assert call_kwargs.kwargs["sample_formula"] == "THF | CuOx | Cu | Ti | Si"
@@ -483,14 +482,14 @@ measurements:
         mock_manifest_data, mock_result = self._setup_mocks(output_dir, run_number=218386)
 
         with (
-            patch("assembler.parsers.ManifestParser") as MockParser,
+            patch("assembler.parsers.ManifestParser") as mock_parser,
             patch("assembler.parsers.ReducedParser"),
-            patch("assembler.workflow.DataAssembler") as MockAssembler,
-            patch("nr_isaac_format.cli.IsaacWriter") as MockWriter,
+            patch("assembler.workflow.DataAssembler") as mock_assembler,
+            patch("nr_isaac_format.cli.IsaacWriter") as mock_writer,
         ):
-            MockParser.return_value.parse.return_value = mock_manifest_data
-            MockAssembler.return_value.assemble.return_value = mock_result
-            MockWriter.return_value.to_isaac.side_effect = self._mock_to_isaac
+            mock_parser.return_value.parse.return_value = mock_manifest_data
+            mock_assembler.return_value.assemble.return_value = mock_result
+            mock_writer.return_value.to_isaac.side_effect = self._mock_to_isaac
 
             result = runner.invoke(main, ["update", str(manifest), "--dry-run"])
 

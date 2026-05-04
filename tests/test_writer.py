@@ -2,10 +2,7 @@
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import MagicMock
-
-import pytest
 
 from nr_isaac_format.writer import IsaacWriter, write_isaac_record
 
