@@ -586,7 +586,7 @@ class TestMigrateCommand:
         return path
 
     def test_migrate_applies_all_rev2_changes(self, runner, tmp_path):
-        """Should apply all rev1→rev2 structural changes."""
+        """Should apply all rev1→rev3 structural changes."""
         record_path = self._make_rev1_record(tmp_path)
 
         result = runner.invoke(main, ["migrate", str(record_path)])
@@ -611,10 +611,13 @@ class TestMigrateCommand:
         assert migrated["system"]["technique"] == "neutron_reflectometry"
         assert "configuration" not in migrated["system"]
 
-    def test_migrate_skips_rev2_record(self, runner, tmp_path):
-        """Should skip record that is already rev2-compatible."""
+        # rev3: version bumped
+        assert migrated["isaac_record_version"] == "1.05"
+
+    def test_migrate_skips_rev3_record(self, runner, tmp_path):
+        """Should skip record that is already rev3-compatible."""
         record = {
-            "isaac_record_version": "1.0",
+            "isaac_record_version": "1.05",
             "record_id": "01HXYZ1234567890ABCDEFGH",
             "record_type": "evidence",
             "record_domain": "characterization",
@@ -629,6 +632,48 @@ class TestMigrateCommand:
         assert result.exit_code == 0, result.output
         assert "Skipped 1 record" in result.output
         assert not (tmp_path / "isaac_record_218386_v2.json").exists()
+
+    def test_migrate_rev2_to_rev3(self, runner, tmp_path):
+        """Should migrate a rev2-shaped record (version 1.0, pressure_Pa
+        and description in context) forward to rev3."""
+        record = {
+            "isaac_record_version": "1.0",
+            "record_id": "01HXYZ1234567890ABCDEFGH",
+            "record_type": "evidence",
+            "record_domain": "characterization",
+            "source_type": "facility",
+            "timestamps": {"created_utc": "2026-03-03T15:23:25Z"},
+            "context": {
+                "environment": "in_situ",
+                "temperature_K": 298.0,
+                "pressure_Pa": 101325.0,
+                "description": "Electrochemical cell, THF electrolyte",
+                "ambient_medium": "D2O",
+            },
+        }
+        path = tmp_path / "isaac_record_218386.json"
+        path.write_text(json.dumps(record, indent=2))
+
+        result = runner.invoke(main, ["migrate", str(path)])
+
+        assert result.exit_code == 0, result.output
+        assert "Migrated 1 record" in result.output
+
+        v2_path = tmp_path / "isaac_record_218386_v2.json"
+        with open(v2_path) as f:
+            migrated = json.load(f)
+
+        assert migrated["isaac_record_version"] == "1.05"
+        ctx = migrated["context"]
+        assert "pressure_Pa" not in ctx
+        assert ctx["thermodynamics"]["pressure_Pa"] == 101325.0
+        assert "description" not in ctx
+        assert "ambient_medium" not in ctx
+
+        snapshot_assets = [
+            a for a in migrated.get("assets", []) if a.get("content_role") == "metadata_snapshot"
+        ]
+        assert len(snapshot_assets) == 1
 
     def test_migrate_does_not_overwrite(self, runner, tmp_path):
         """Should never overwrite the original file."""

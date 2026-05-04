@@ -718,6 +718,62 @@ def _migrate_record_to_rev2(record: dict) -> bool:
     return changed
 
 
+def _migrate_record_to_rev3(record: dict) -> bool:
+    """Migrate an ISAAC record from rev2 schema to rev3 in-place.
+
+    Applies all structural changes required by v1-ornl-rev3:
+    - Bumps ``isaac_record_version`` to ``"1.05"``
+    - Moves ``context.pressure_Pa`` under ``context.thermodynamics``
+    - Strips ``context.description`` and ``context.ambient_medium`` (rev3
+      forbids these via ``additionalProperties: false``) and re-emits them
+      as a ``metadata_snapshot`` asset so the data is preserved.
+
+    Returns True if any changes were made, False if already rev3-compatible.
+    """
+    import base64
+    import hashlib
+
+    changed = False
+
+    if record.get("isaac_record_version") != "1.05":
+        record["isaac_record_version"] = "1.05"
+        changed = True
+
+    ctx = record.get("context")
+    if isinstance(ctx, dict):
+        if "pressure_Pa" in ctx:
+            pressure = ctx.pop("pressure_Pa")
+            thermo = ctx.setdefault("thermodynamics", {})
+            thermo.setdefault("pressure_Pa", pressure)
+            changed = True
+
+        snapshot_payload: dict = {}
+        for legacy_key in ("description", "ambient_medium"):
+            if legacy_key in ctx:
+                snapshot_payload[legacy_key] = ctx.pop(legacy_key)
+                changed = True
+
+        if snapshot_payload:
+            inline = json.dumps(snapshot_payload, sort_keys=True)
+            sha = hashlib.sha256(inline.encode("utf-8")).hexdigest()
+            uri = (
+                "data:application/json;base64,"
+                + base64.b64encode(inline.encode("utf-8")).decode("ascii")
+            )
+            assets = record.setdefault("assets", [])
+            assets.append(
+                {
+                    "asset_id": "context_metadata_snapshot",
+                    "content_role": "metadata_snapshot",
+                    "media_type": "application/json",
+                    "uri": uri,
+                    "sha256": sha,
+                }
+            )
+
+    return changed
+
+
 # ---------------------------------------------------------------------------
 # update command
 # ---------------------------------------------------------------------------
@@ -991,12 +1047,15 @@ def update(manifest: Path, compact: bool, dry_run: bool) -> None:
 @main.command()
 @click.argument("paths", nargs=-1, required=True)
 def migrate(paths: tuple[str, ...]) -> None:
-    """Migrate ISAAC records to the latest schema revision (v1-ornl-rev2).
+    """Migrate ISAAC records to the latest schema revision (v1-ornl-rev3).
 
-    Lightweight schema-only migration: applies structural changes (removes
-    acquisition_source, fixes descriptor sources, adds system.technique, etc.)
-    without re-running the data pipeline.  Use this when the original data
-    files are not available; prefer ``update`` for a full regeneration.
+    Lightweight schema-only migration: applies structural changes from
+    rev1 → rev2 (acquisition_source removal, descriptor source remap,
+    system.technique addition) and rev2 → rev3 (version bump,
+    pressure_Pa relocation under thermodynamics, removal of forbidden
+    context fields into a metadata_snapshot asset) without re-running
+    the data pipeline. Use this when the original data files are not
+    available; prefer ``update`` for a full regeneration.
 
     Writes a new versioned copy — the original file is never overwritten.
 
@@ -1011,7 +1070,9 @@ def migrate(paths: tuple[str, ...]) -> None:
         sys.exit(1)
 
     click.echo(
-        click.style(f"Migrating {len(files)} record(s) to rev2 schema", fg="cyan", bold=True)
+        click.style(
+            f"Migrating {len(files)} record(s) to rev3 schema", fg="cyan", bold=True
+        )
     )
     click.echo()
 
@@ -1027,8 +1088,11 @@ def migrate(paths: tuple[str, ...]) -> None:
             click.echo(click.style(f"  ✗ {label}: {e}", fg="red"), err=True)
             continue
 
-        if not _migrate_record_to_rev2(record):
-            click.echo(click.style(f"  – {label}: already rev2-compatible", fg="yellow"))
+        changed = _migrate_record_to_rev2(record)
+        changed = _migrate_record_to_rev3(record) or changed
+
+        if not changed:
+            click.echo(click.style(f"  – {label}: already rev3-compatible", fg="yellow"))
             skipped += 1
             continue
 
@@ -1044,7 +1108,7 @@ def migrate(paths: tuple[str, ...]) -> None:
     if migrated:
         click.echo(click.style(f"Migrated {migrated} record(s).", fg="green"))
     if skipped:
-        click.echo(click.style(f"Skipped {skipped} record(s) (already rev2).", fg="yellow"))
+        click.echo(click.style(f"Skipped {skipped} record(s) (already rev3).", fg="yellow"))
 
 
 if __name__ == "__main__":

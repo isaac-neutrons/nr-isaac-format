@@ -1,10 +1,27 @@
 """Tests for the minimal IsaacWriter."""
 
+import base64
 import json
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 from nr_isaac_format.writer import IsaacWriter, write_isaac_record
+
+
+def _find_metadata_snapshot(record: dict) -> dict | None:
+    """Return the metadata_snapshot asset from a record, or None."""
+    for asset in record.get("assets", []) or []:
+        if asset.get("content_role") == "metadata_snapshot":
+            return asset
+    return None
+
+
+def _decode_snapshot(asset: dict) -> dict:
+    """Decode a metadata_snapshot inline-data URI into its JSON payload."""
+    uri = asset["uri"]
+    prefix = "data:application/json;base64,"
+    assert uri.startswith(prefix), uri
+    return json.loads(base64.b64decode(uri[len(prefix):]).decode("utf-8"))
 
 
 def create_mock_result(
@@ -35,7 +52,7 @@ class TestIsaacWriter:
         writer = IsaacWriter()
         record = writer.to_isaac(result)
 
-        assert record["isaac_record_version"] == "1.0"
+        assert record["isaac_record_version"] == "1.05"
         assert record["record_type"] == "evidence"
         assert record["record_domain"] == "characterization"
         assert "record_id" in record
@@ -50,13 +67,11 @@ class TestIsaacWriter:
                 "facility": "SNS",
                 "instrument_name": "REF_L",
                 "run_start": datetime(2025, 1, 15, 10, 30, tzinfo=timezone.utc),
-                "reflectivity": {
-                    "q": [0.01, 0.02, 0.03],
-                    "r": [0.95, 0.85, 0.70],
-                    "dr": [0.01, 0.01, 0.02],
-                    "dq": [0.001, 0.002, 0.003],
-                    "measurement_geometry": "front reflection",
-                },
+                "q": [0.01, 0.02, 0.03],
+                "r": [0.95, 0.85, 0.70],
+                "dr": [0.01, 0.01, 0.02],
+                "dq": [0.001, 0.002, 0.003],
+                "measurement_geometry": "front reflection",
             }
         )
 
@@ -116,8 +131,9 @@ class TestIsaacWriter:
         assert record["sample"]["material"]["formula"] == "Fe/Si"
         # No provenance in enum for plain mock data → key omitted
         assert "provenance" not in record["sample"]["material"]
-        assert record["sample"]["geometry"]["layer_count"] == 2
-        assert record["sample"]["geometry"]["total_thickness_nm"] == 510.0
+        # Schema rev3 has a self-contradictory geometry definition; the writer
+        # omits the geometry block entirely until upstream is fixed.
+        assert "geometry" not in record["sample"]
 
     def test_sample_provenance_mapping(self):
         """Should map known provenance strings to schema enum values."""
@@ -148,7 +164,7 @@ class TestIsaacWriter:
         assert record["sample"]["material"]["provenance"] == "theoretical"
 
     def test_with_environment_data(self):
-        """Should map environment data to context block."""
+        """Should map environment data to context block (rev3 layout)."""
         result = create_mock_result(
             reflectivity={"facility": "SNS"},
             environment={
@@ -165,12 +181,21 @@ class TestIsaacWriter:
         assert "context" in record
         ctx = record["context"]
         assert ctx["temperature_K"] == 298.0
-        assert ctx["pressure_Pa"] == 101325.0
-        assert ctx["ambient_medium"] == "D2O"
-        assert ctx["environment"] == "in_situ"  # enum value
+        # rev3: pressure lives under thermodynamics
+        assert ctx["thermodynamics"]["pressure_Pa"] == 101325.0
+        assert ctx["environment"] == "in_situ"
+        # rev3 forbids context.ambient_medium and context.description; they
+        # are preserved in a metadata_snapshot asset instead.
+        assert "ambient_medium" not in ctx
+        assert "description" not in ctx
+        snapshot = _find_metadata_snapshot(record)
+        assert snapshot is not None
+        payload = _decode_snapshot(snapshot)
+        assert payload["ambient_medium"] == "D2O"
 
     def test_context_classifies_electrochemical(self):
-        """Should classify electrochemical descriptions as operando."""
+        """Should classify electrochemical descriptions as operando and stash
+        the free-text description in a metadata_snapshot asset."""
         result = create_mock_result(
             reflectivity={"facility": "SNS"},
             environment={
@@ -181,8 +206,14 @@ class TestIsaacWriter:
         record = writer.to_isaac(result)
         ctx = record["context"]
         assert ctx["environment"] == "operando"
-        assert ctx["description"] == "Electrochemical cell, THF electrolyte, steady-state OCV"
-
+        assert "description" not in ctx
+        snapshot = _find_metadata_snapshot(record)
+        assert snapshot is not None
+        payload = _decode_snapshot(snapshot)
+        assert (
+            payload["description"]
+            == "Electrochemical cell, THF electrolyte, steady-state OCV"
+        )
     def test_context_defaults_required_fields(self):
         """Should default temperature_K and environment when not provided."""
         result = create_mock_result(
@@ -203,7 +234,7 @@ class TestIsaacWriter:
             reflectivity={
                 "facility": "SNS",
                 "instrument_name": "REF_L",
-                "reflectivity": {"measurement_geometry": "front reflection"},
+                "measurement_geometry": "front reflection",
             },
         )
 
@@ -225,8 +256,12 @@ class TestIsaacWriter:
         assert "context" in record
         # Electrochemical → classified as operando
         assert record["context"]["environment"] == "operando"
-        assert record["context"]["description"] == "Electrochemical cell, THF electrolyte"
+        assert "description" not in record["context"]
         assert "temperature_K" in record["context"]  # required by schema
+        snapshot = _find_metadata_snapshot(record)
+        assert snapshot is not None
+        payload = _decode_snapshot(snapshot)
+        assert payload["description"] == "Electrochemical cell, THF electrolyte"
 
     def test_environment_description_does_not_override_existing(self):
         """Should not override existing environment description."""
@@ -241,7 +276,7 @@ class TestIsaacWriter:
         assert record["context"]["environment"] == "in_situ"
 
     def test_context_description_from_manifest(self):
-        """Should use context_description for the context.description field."""
+        """Should preserve context_description in a metadata_snapshot asset."""
         result = create_mock_result(reflectivity={"facility": "SNS"})
         writer = IsaacWriter()
         record = writer.to_isaac(
@@ -252,7 +287,14 @@ class TestIsaacWriter:
 
         ctx = record["context"]
         assert ctx["environment"] == "operando"
-        assert ctx["description"] == "Electrochemical cell, THF electrolyte, steady-state OCV"
+        assert "description" not in ctx
+        snapshot = _find_metadata_snapshot(record)
+        assert snapshot is not None
+        payload = _decode_snapshot(snapshot)
+        assert (
+            payload["description"]
+            == "Electrochemical cell, THF electrolyte, steady-state OCV"
+        )
 
     def test_context_description_overrides_env_text(self):
         """Explicit context_description should take precedence over env description."""
@@ -266,13 +308,15 @@ class TestIsaacWriter:
             context_description="Custom context note",
         )
 
-        ctx = record["context"]
-        assert ctx["description"] == "Custom context note"
+        snapshot = _find_metadata_snapshot(record)
+        assert snapshot is not None
+        payload = _decode_snapshot(snapshot)
+        assert payload["description"] == "Custom context note"
 
     def test_raw_file_path_from_manifest(self):
         """Should include manifest raw_file_path in assets."""
         result = create_mock_result(
-            reflectivity={"facility": "SNS", "reflectivity": {"q": [0.01], "r": [0.9]}},
+            reflectivity={"facility": "SNS", "q": [0.01], "r": [0.9]},
         )
         writer = IsaacWriter()
         record = writer.to_isaac(
@@ -291,7 +335,8 @@ class TestIsaacWriter:
             reflectivity={
                 "facility": "SNS",
                 "raw_file_path": "/old/path.nxs.h5",
-                "reflectivity": {"q": [0.01], "r": [0.9]},
+                "q": [0.01],
+                "r": [0.9],
             },
         )
         writer = IsaacWriter()
@@ -309,7 +354,8 @@ class TestIsaacWriter:
         result = create_mock_result(
             reflectivity={
                 "facility": "SNS",
-                "reflectivity": {"q": [0.01], "r": [0.95]},
+                "q": [0.01],
+                "r": [0.95],
             }
         )
 
@@ -320,7 +366,7 @@ class TestIsaacWriter:
         assert path.exists()
         with open(path) as f:
             record = json.load(f)
-        assert record["isaac_record_version"] == "1.0"
+        assert record["isaac_record_version"] == "1.05"
 
     def test_write_with_output_dir(self, tmp_path):
         """Should write to output_dir when no path specified."""
@@ -339,7 +385,7 @@ class TestConvenienceFunction:
     def test_write_isaac_record(self, tmp_path):
         """Should write record using convenience function."""
         result = create_mock_result(
-            reflectivity={"facility": "SNS", "reflectivity": {"q": [0.01], "r": [0.9]}}
+            reflectivity={"facility": "SNS", "q": [0.01], "r": [0.9]}
         )
 
         output_path = tmp_path / "record.json"

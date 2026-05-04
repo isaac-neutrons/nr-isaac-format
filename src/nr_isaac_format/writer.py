@@ -2,11 +2,13 @@
 ISAAC AI-Ready Record Writer
 
 Minimal writer following the data-assembler pattern.
-Converts AssemblyResult to ISAAC AI-Ready Scientific Record v1.0 format.
+Converts AssemblyResult to ISAAC AI-Ready Scientific Record (schema
+revision ``v1-ornl-rev3``) format.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,8 +19,13 @@ from ulid import ULID
 
 __all__ = ["IsaacWriter", "write_isaac_record"]
 
+
+def _b64(text: str) -> str:
+    """Return base64-encoded UTF-8 ``text`` (used for inline data URIs)."""
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
 # Schema revision this writer targets. Bump when updating for a new schema.
-SCHEMA_REVISION = "v1-ornl-rev2"
+SCHEMA_REVISION = "v1-ornl-rev3"
 
 
 class IsaacWriter:
@@ -106,8 +113,19 @@ class IsaacWriter:
                 record["system"] = system_block
 
             assets_block = self._map_assets(refl, result, raw_file_path=raw_file_path)
-            if assets_block:
-                record["assets"] = assets_block
+        else:
+            assets_block = None
+
+        # Stash schema-forbidden context fields (description, ambient_medium)
+        # in a metadata_snapshot asset so the data is preserved.
+        snapshot_asset = self._build_metadata_snapshot_asset(
+            env, context_description=context_description
+        )
+        if snapshot_asset:
+            assets_block = (assets_block or []) + [snapshot_asset]
+
+        if assets_block:
+            record["assets"] = assets_block
 
         return record
 
@@ -306,16 +324,14 @@ class IsaacWriter:
             if provenance:
                 result["material"]["provenance"] = provenance
 
-        layers = sample.get("layers", [])
-        if layers:
-            result["geometry"] = {
-                "layer_count": len(layers),
-                "total_thickness_nm": sum(layer.get("thickness", 0) for layer in layers),
-            }
-
+        # ``sample.geometry`` in schema rev3 is defined with a contradictory
+        # ``{"type": "object", "enum": [<string keys>]}`` shape that no concrete
+        # object can satisfy.  Until the schema is corrected upstream we omit
+        # the geometry block; layer details remain available on the assembler
+        # result for downstream tooling.
         return result
 
-    # Valid provenance values per ISAAC v1 ornl-rev1 schema
+    # Valid provenance values per ISAAC v1-ornl-rev3 schema
     _PROVENANCE_ENUM = frozenset(
         {
             "commercial",
@@ -369,7 +385,7 @@ class IsaacWriter:
 
         return result
 
-    # Valid environment enum values per ISAAC v1 ornl-rev1 schema
+    # Valid environment enum values per ISAAC v1-ornl-rev3 schema
     _ENVIRONMENT_ENUM = frozenset(
         {
             "operando",
@@ -408,7 +424,14 @@ class IsaacWriter:
     def _map_context(
         self, env: dict, context_description: str | None = None
     ) -> dict[str, Any] | None:
-        """Map environment record to ISAAC context block."""
+        """Map environment record to ISAAC context block.
+
+        Schema rev3 forbids free-form context keys (additionalProperties:
+        false). Only ``environment``, ``temperature_K`` and the typed
+        ``thermodynamics`` block are emitted here. Free-text description
+        and ``ambient_medium`` are preserved separately via
+        :meth:`_build_metadata_snapshot_asset`.
+        """
         if not env:
             return None
 
@@ -422,13 +445,55 @@ class IsaacWriter:
             else 295.0,
         }
 
-        # Use explicit context_description from manifest if provided,
-        # otherwise fall back to the environment description text.
-
         if env.get("pressure"):
-            result["pressure_Pa"] = env["pressure"]
+            result["thermodynamics"] = {"pressure_Pa": env["pressure"]}
 
         return result
+
+    def _build_metadata_snapshot_asset(
+        self, env: dict, context_description: str | None = None
+    ) -> dict[str, Any] | None:
+        """Build a ``metadata_snapshot`` asset preserving context fields
+        that schema rev3 disallows under ``context``.
+
+        Captures the manifest free-text description (preferring the
+        explicit ``context_description`` argument over the environment
+        record's ``description``) and ``ambient_medium``. Returns ``None``
+        if no preservable data is present.
+        """
+        env = env or {}
+        env_description = env.get("description")
+        environment_enum = self._classify_environment(env_description or "not specified")
+
+        # Prefer explicit manifest context, then env description (only when
+        # it is not just the bare enum keyword).
+        description = context_description
+        if not description and env_description and env_description != environment_enum:
+            description = env_description
+
+        ambient_medium = env.get("ambient_medium")
+
+        if not description and not ambient_medium:
+            return None
+
+        payload: dict[str, Any] = {}
+        if description:
+            payload["description"] = description
+        if ambient_medium:
+            payload["ambient_medium"] = ambient_medium
+
+        inline = json.dumps(payload, sort_keys=True)
+        import hashlib
+
+        sha = hashlib.sha256(inline.encode("utf-8")).hexdigest()
+
+        return {
+            "asset_id": "context_metadata_snapshot",
+            "content_role": "metadata_snapshot",
+            "media_type": "application/json",
+            "uri": "data:application/json;base64," + _b64(inline),
+            "sha256": sha,
+        }
 
     def _map_assets(
         self, refl: dict, result: AssemblyResult, raw_file_path: str | None = None

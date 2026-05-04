@@ -12,6 +12,31 @@ Tracks changes between bundled schema revisions and their impact on the writer.
 
 ---
 
+## v1-ornl-rev3 (from rev2)
+
+### Breaking changes
+
+| Change | Detail | Writer action |
+|--------|--------|--------------|
+| `isaac_record_version` const | `"1.0"` → `"1.05"` | Bumped `ISAAC_VERSION` |
+| `context.additionalProperties: false` | Only `electrochemistry`, `environment`, `simulation_assumptions`, `temperature_K`, `thermodynamics`, `transport` allowed | Removed `description` and `ambient_medium` from `_map_context()`; preserved via `metadata_snapshot` asset |
+| `context.pressure_Pa` removed | Pressure now lives at `context.thermodynamics.pressure_Pa` | `_map_context()` emits a `thermodynamics` sub-block |
+
+### Non-breaking additions
+
+- `assets[].content_role`: added `metadata_snapshot` (used by writer to stash legacy/freeform context fields as base64-encoded inline JSON)
+- `assets[].provenance`: added `fabricated`
+- New optional top-level `computation` block
+
+### Migration
+
+`nr-isaac-format migrate` chains rev1→rev2→rev3 transformations. The rev3
+step bumps the version, relocates `pressure_Pa` under `thermodynamics`,
+and rebuilds the `metadata_snapshot` asset for any stripped legacy
+context fields.
+
+---
+
 ## v1-ornl-rev2 (from rev1)
 
 ### Breaking changes
