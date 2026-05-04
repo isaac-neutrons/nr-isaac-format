@@ -507,9 +507,7 @@ def _extract_schema_version(schema: dict) -> str:
     return "unknown"
 
 
-def _next_revision(
-    schema_dir: Path, version: str, prefix: str = "isaac_record"
-) -> int:
+def _next_revision(schema_dir: Path, version: str, prefix: str = "isaac_record") -> int:
     """Determine the next revision number for a given version.
 
     Scans *schema_dir* for files matching
@@ -518,9 +516,7 @@ def _next_revision(
     """
     import re
 
-    pattern = re.compile(
-        rf"^{re.escape(prefix)}_v{re.escape(version)}-ornl-rev(\d+)\.json$"
-    )
+    pattern = re.compile(rf"^{re.escape(prefix)}_v{re.escape(version)}-ornl-rev(\d+)\.json$")
     max_rev = 0
     if schema_dir.is_dir():
         for f in schema_dir.iterdir():
@@ -630,9 +626,7 @@ def fetch_ontology(url: Optional[str], token: Optional[str]) -> None:
     version = _extract_schema_version(ontology)
     if version == "unknown":
         click.echo(
-            click.style(
-                "Warning: could not detect ontology version; using 'unknown'", fg="yellow"
-            ),
+            click.style("Warning: could not detect ontology version; using 'unknown'", fg="yellow"),
             err=True,
         )
 
@@ -753,9 +747,7 @@ def _next_record_version(file_path: Path) -> Path:
     return parent / f"{base_stem}_v{max_ver + 1}.json"
 
 
-def _find_existing_record_id(
-    output_dir: Path, run_number: str
-) -> tuple[str | None, Path | None]:
+def _find_existing_record_id(output_dir: Path, run_number: str) -> tuple[str | None, Path | None]:
     """Look for an existing ISAAC record for a run number and return its record_id.
 
     Checks for ``isaac_record_<run>.json`` first (original), then falls back
@@ -882,9 +874,7 @@ def update(manifest: Path, compact: bool, dry_run: bool) -> None:
                     measurement.parquet, run_number=run_number
                 )
             except Exception as e:
-                click.echo(
-                    click.style(f"  Error parsing parquet files: {e}", fg="red"), err=True
-                )
+                click.echo(click.style(f"  Error parsing parquet files: {e}", fg="red"), err=True)
                 sys.exit(1)
 
         # Parse model (optional, measurement-level overrides sample-level)
@@ -898,9 +888,7 @@ def update(manifest: Path, compact: bool, dry_run: bool) -> None:
             try:
                 model_data = model_parser.parse(model_file, dataset_index=ds_index)
             except Exception as e:
-                click.echo(
-                    click.style(f"  Error parsing model file: {e}", fg="red"), err=True
-                )
+                click.echo(click.style(f"  Error parsing model file: {e}", fg="red"), err=True)
                 sys.exit(1)
 
         # Assemble via data-assembler

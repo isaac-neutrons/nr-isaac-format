@@ -53,6 +53,7 @@ def record_dir(tmp_path: Path) -> Path:
 # push command
 # ---------------------------------------------------------------------------
 
+
 class TestPushCommand:
     """Tests for ``nr-isaac-format push``."""
 
@@ -175,9 +176,7 @@ class TestPushCommand:
         mock_client.__exit__ = MagicMock(return_value=False)
         mock_client_cls.return_value = mock_client
 
-        result = runner.invoke(
-            main, ["push", str(record_file), "--token", "override-tok"]
-        )
+        result = runner.invoke(main, ["push", str(record_file), "--token", "override-tok"])
         assert result.exit_code == 0, result.output
         # The client should have been created with the override token
         mock_client_cls.assert_called_once_with("https://api.test", "override-tok")
@@ -186,6 +185,7 @@ class TestPushCommand:
 # ---------------------------------------------------------------------------
 # health command
 # ---------------------------------------------------------------------------
+
 
 class TestHealthCommand:
     """Tests for ``nr-isaac-format health``."""
@@ -222,6 +222,7 @@ class TestHealthCommand:
 # ---------------------------------------------------------------------------
 # fetch-schema command
 # ---------------------------------------------------------------------------
+
 
 class TestFetchSchemaCommand:
     """Tests for ``nr-isaac-format fetch-schema``."""

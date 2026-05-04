@@ -19,6 +19,7 @@ from nr_isaac_format.client import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _mock_response(
     status_code: int = 200,
     json_body: dict[str, Any] | list[Any] | None = None,
@@ -35,6 +36,7 @@ def _mock_response(
 # ---------------------------------------------------------------------------
 # IsaacClient.health
 # ---------------------------------------------------------------------------
+
 
 class TestHealth:
     def test_healthy(self):
@@ -59,6 +61,7 @@ class TestHealth:
 # ---------------------------------------------------------------------------
 # IsaacClient.validate
 # ---------------------------------------------------------------------------
+
 
 class TestValidate:
     def test_valid_record(self):
@@ -108,6 +111,7 @@ class TestValidate:
 # IsaacClient.create
 # ---------------------------------------------------------------------------
 
+
 class TestCreate:
     def test_success(self):
         client = IsaacClient("https://example.com/api", "tok")
@@ -148,6 +152,7 @@ class TestCreate:
 # IsaacClient.list_records / get_record
 # ---------------------------------------------------------------------------
 
+
 class TestListAndGet:
     def test_list_records(self):
         client = IsaacClient("https://example.com/api", "tok")
@@ -172,6 +177,7 @@ class TestListAndGet:
 # ---------------------------------------------------------------------------
 # IsaacClient.get_schema
 # ---------------------------------------------------------------------------
+
 
 class TestGetSchema:
     def test_success(self):
@@ -202,6 +208,7 @@ class TestGetSchema:
 # Context manager
 # ---------------------------------------------------------------------------
 
+
 class TestContextManager:
     def test_context_manager_closes(self):
         client = IsaacClient("https://example.com/api", "tok")
@@ -215,6 +222,7 @@ class TestContextManager:
 # ---------------------------------------------------------------------------
 # URL trailing-slash handling
 # ---------------------------------------------------------------------------
+
 
 class TestURLNormalization:
     def test_strips_trailing_slash(self):

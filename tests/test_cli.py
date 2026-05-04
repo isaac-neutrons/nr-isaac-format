@@ -84,10 +84,11 @@ class TestConvertCommand:
         }
         mock_writer_cls.return_value = mock_writer
 
-        with patch("assembler.parsers.ManifestParser") as mock_manifest_cls, \
-             patch("assembler.parsers.ReducedParser") as mock_reduced_cls, \
-             patch("assembler.workflow.DataAssembler") as mock_assembler_cls:
-
+        with (
+            patch("assembler.parsers.ManifestParser") as mock_manifest_cls,
+            patch("assembler.parsers.ReducedParser") as mock_reduced_cls,
+            patch("assembler.workflow.DataAssembler") as mock_assembler_cls,
+        ):
             # Set up manifest parser mock
             from assembler.parsers.manifest_parser import (
                 Manifest,
@@ -134,10 +135,11 @@ class TestConvertCommand:
         mock_writer.to_isaac.return_value = {"isaac_record_version": "1.0"}
         mock_writer_cls.return_value = mock_writer
 
-        with patch("assembler.parsers.ManifestParser") as mock_manifest_cls, \
-             patch("assembler.parsers.ReducedParser") as mock_reduced_cls, \
-             patch("assembler.workflow.DataAssembler") as mock_assembler_cls:
-
+        with (
+            patch("assembler.parsers.ManifestParser") as mock_manifest_cls,
+            patch("assembler.parsers.ReducedParser") as mock_reduced_cls,
+            patch("assembler.workflow.DataAssembler") as mock_assembler_cls,
+        ):
             from assembler.parsers.manifest_parser import (
                 Manifest,
                 ManifestMeasurement,
@@ -176,10 +178,11 @@ class TestConvertCommand:
         mock_result.has_errors = True
         mock_result.errors = ["Reduced data is malformed"]
 
-        with patch("assembler.parsers.ManifestParser") as mock_manifest_cls, \
-             patch("assembler.parsers.ReducedParser") as mock_reduced_cls, \
-             patch("assembler.workflow.DataAssembler") as mock_assembler_cls:
-
+        with (
+            patch("assembler.parsers.ManifestParser") as mock_manifest_cls,
+            patch("assembler.parsers.ReducedParser") as mock_reduced_cls,
+            patch("assembler.workflow.DataAssembler") as mock_assembler_cls,
+        ):
             from assembler.parsers.manifest_parser import (
                 Manifest,
                 ManifestMeasurement,
@@ -216,10 +219,11 @@ class TestConvertCommand:
         result_1 = _make_mock_result(sample_id="sample-uuid-1234", has_sample=True)
         result_2 = _make_mock_result(has_sample=False)
 
-        with patch("assembler.parsers.ManifestParser") as mock_manifest_cls, \
-             patch("assembler.parsers.ReducedParser") as mock_reduced_cls, \
-             patch("assembler.workflow.DataAssembler") as mock_assembler_cls:
-
+        with (
+            patch("assembler.parsers.ManifestParser") as mock_manifest_cls,
+            patch("assembler.parsers.ReducedParser") as mock_reduced_cls,
+            patch("assembler.workflow.DataAssembler") as mock_assembler_cls,
+        ):
             from assembler.parsers.manifest_parser import (
                 Manifest,
                 ManifestMeasurement,

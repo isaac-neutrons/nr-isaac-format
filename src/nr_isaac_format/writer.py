@@ -76,7 +76,9 @@ class IsaacWriter:
         # Optional blocks
         if result.sample:
             sample_block = self._map_sample(
-                result.sample, sample_name=sample_name, sample_formula=sample_formula,
+                result.sample,
+                sample_name=sample_name,
+                sample_formula=sample_formula,
             )
             if sample_block:
                 record["sample"] = sample_block

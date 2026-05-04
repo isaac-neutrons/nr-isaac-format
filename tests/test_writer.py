@@ -238,9 +238,7 @@ class TestIsaacWriter:
             environment={"description": "in_situ"},
         )
         writer = IsaacWriter()
-        record = writer.to_isaac(
-            result, environment_description="From manifest"
-        )
+        record = writer.to_isaac(result, environment_description="From manifest")
 
         # Original description is "in_situ" which classifies directly
         assert record["context"]["environment"] == "in_situ"
