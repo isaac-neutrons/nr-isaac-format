@@ -62,17 +62,15 @@ class IsaacWriter:
         """
         now = datetime.now(timezone.utc)
         refl = result.reflectivity or {}
-        refl_data = refl.get("reflectivity", {})
-
         record = {
-            "isaac_record_version": "1.0",
+            "isaac_record_version": "1.05",
             "record_id": record_id or str(ULID()).upper(),
             "record_type": "evidence",
             "record_domain": "characterization",
             "source_type": "facility",
             "timestamps": self._map_timestamps(refl, now),
-            "measurement": self._map_measurement(refl_data),
-            "descriptors": self._map_descriptors(refl_data, now),
+            "measurement": self._map_measurement(refl),
+            "descriptors": self._map_descriptors(refl, now),
         }
 
         # Optional blocks
@@ -424,15 +422,9 @@ class IsaacWriter:
 
         # Use explicit context_description from manifest if provided,
         # otherwise fall back to the environment description text.
-        desc = context_description or description
-        if desc and desc != environment_enum:
-            result["description"] = desc
 
         if env.get("pressure"):
             result["pressure_Pa"] = env["pressure"]
-
-        if env.get("ambient_medium"):
-            result["ambient_medium"] = env["ambient_medium"]
 
         return result
 
