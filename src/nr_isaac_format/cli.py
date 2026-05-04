@@ -362,7 +362,7 @@ def push(
         nr-isaac-format push output/ --validate-only
         nr-isaac-format push output/ --token my-secret-key
     """
-    from .client import IsaacClient, IsaacAuthError, IsaacValidationError, IsaacAPIError
+    from .client import IsaacAPIError, IsaacAuthError, IsaacClient, IsaacValidationError
 
     base_url, api_token = _resolve_credentials(url, token)
     files = _collect_json_files(paths)
@@ -459,7 +459,7 @@ def push(
 @click.option("--token", default=None, help="Override ISAAC_KEY from .env.")
 def health(url: Optional[str], token: Optional[str]) -> None:
     """Check connectivity to the ISAAC Portal API."""
-    from .client import IsaacClient, IsaacAPIError
+    from .client import IsaacAPIError, IsaacClient
 
     base_url, api_token = _resolve_credentials(url, token)
 
