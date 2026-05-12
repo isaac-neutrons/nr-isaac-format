@@ -697,3 +697,168 @@ class TestMigrateCommand:
         assert "Migrated 2 record" in result.output
         assert (records_dir / "isaac_record_218386_v2.json").exists()
         assert (records_dir / "isaac_record_218393_v2.json").exists()
+
+
+class TestConvertIngestCommand:
+    """Tests for the convert-ingest command (operates on data-assembler ingest output)."""
+
+    @staticmethod
+    def _make_json_ingest_dir(tmp_path, run_number="218386", with_sample=True, with_env=True):
+        """Create a fake `data-assembler ingest --json` output directory."""
+        ingest_dir = tmp_path / "ingest"
+        json_dir = ingest_dir / "json"
+        json_dir.mkdir(parents=True)
+
+        reflectivity = {
+            "id": "refl-001",
+            "facility": "SNS",
+            "instrument_name": "REF_L",
+            "run_number": run_number,
+            "run_title": f"Test run {run_number}",
+            "q": [0.01, 0.02, 0.03],
+            "r": [0.95, 0.85, 0.70],
+            "dr": [0.01, 0.01, 0.01],
+            "dq": [0.001, 0.001, 0.001],
+        }
+        (json_dir / "reflectivity.json").write_text(json.dumps(reflectivity))
+
+        if with_sample:
+            sample = {
+                "id": "sample-001",
+                "description": "Test sample",
+                "main_composition": "Cu",
+                "formula": "Cu",
+            }
+            (json_dir / "sample.json").write_text(json.dumps(sample))
+
+        if with_env:
+            env = {"id": "env-001", "description": "ambient air", "temperature": 295.0}
+            (json_dir / "environment.json").write_text(json.dumps(env))
+
+        return ingest_dir
+
+    def test_convert_ingest_from_json(self, runner, tmp_path):
+        """Should convert a JSON ingest output to an ISAAC record."""
+        ingest_dir = self._make_json_ingest_dir(tmp_path)
+
+        result = runner.invoke(main, ["convert-ingest", str(ingest_dir)])
+
+        assert result.exit_code == 0, result.output
+        out_file = ingest_dir / "isaac_record_218386.json"
+        assert out_file.exists()
+
+        record = json.loads(out_file.read_text())
+        assert record["record_type"] == "evidence"
+        assert "measurement" in record
+        assert record["sample"]["material"]["name"] == "Cu"
+
+    def test_convert_ingest_with_output_dir(self, runner, tmp_path):
+        """Should write to the directory passed via -o."""
+        ingest_dir = self._make_json_ingest_dir(tmp_path)
+        out_dir = tmp_path / "isaac"
+
+        result = runner.invoke(main, ["convert-ingest", str(ingest_dir), "-o", str(out_dir)])
+
+        assert result.exit_code == 0, result.output
+        assert (out_dir / "isaac_record_218386.json").exists()
+
+    def test_convert_ingest_with_output_file(self, runner, tmp_path):
+        """Should write to the exact path when -o ends in .json."""
+        ingest_dir = self._make_json_ingest_dir(tmp_path)
+        out_file = tmp_path / "custom.json"
+
+        result = runner.invoke(main, ["convert-ingest", str(ingest_dir), "-o", str(out_file)])
+
+        assert result.exit_code == 0, result.output
+        assert out_file.exists()
+
+    def test_convert_ingest_dry_run(self, runner, tmp_path):
+        """Should not write a file when --dry-run is set."""
+        ingest_dir = self._make_json_ingest_dir(tmp_path)
+
+        result = runner.invoke(main, ["convert-ingest", str(ingest_dir), "--dry-run"])
+
+        assert result.exit_code == 0, result.output
+        assert "dry run" in result.output.lower()
+        assert not (ingest_dir / "isaac_record_218386.json").exists()
+
+    def test_convert_ingest_missing_reflectivity(self, runner, tmp_path):
+        """Should fail if no reflectivity output is present."""
+        ingest_dir = tmp_path / "empty"
+        ingest_dir.mkdir()
+
+        result = runner.invoke(main, ["convert-ingest", str(ingest_dir)])
+
+        assert result.exit_code != 0
+        assert "No reflectivity output" in result.output
+
+    def test_convert_ingest_from_parquet(self, runner, tmp_path):
+        """Should fall back to parquet files when no JSON is present."""
+        from datetime import datetime, timezone
+
+        from assembler.workflow.result import AssemblyResult
+        from assembler.writers.parquet_writer import write_assembly_to_parquet
+
+        ingest_dir = tmp_path / "ingest"
+        ingest_dir.mkdir()
+        write_assembly_to_parquet(
+            AssemblyResult(
+                reflectivity={
+                    "id": "refl-001",
+                    "created_at": datetime.now(timezone.utc),
+                    "proposal_number": None,
+                    "facility": "SNS",
+                    "laboratory": None,
+                    "probe": None,
+                    "technique": None,
+                    "technique_description": None,
+                    "is_simulated": False,
+                    "run_title": "Parquet test",
+                    "run_number": "777777",
+                    "run_start": datetime.now(timezone.utc),
+                    "raw_file_path": None,
+                    "instrument_name": "REF_L",
+                    "measurement_geometry": "specular",
+                    "reduction_time": None,
+                    "reduction_version": None,
+                    "q": [0.01, 0.02],
+                    "r": [0.95, 0.85],
+                    "dr": [0.01, 0.01],
+                    "dq": [0.001, 0.001],
+                },
+            ),
+            ingest_dir,
+        )
+
+        result = runner.invoke(main, ["convert-ingest", str(ingest_dir)])
+
+        assert result.exit_code == 0, result.output
+        record = json.loads((ingest_dir / "isaac_record_777777.json").read_text())
+        assert record["system"]["facility"]["facility_name"] == "SNS"
+
+    def test_convert_ingest_overrides(self, runner, tmp_path):
+        """Sample-name/formula and raw flags should propagate to the writer."""
+        ingest_dir = self._make_json_ingest_dir(tmp_path, with_sample=False)
+        raw_file = tmp_path / "raw.nxs.h5"
+        raw_file.write_bytes(b"fake")
+
+        result = runner.invoke(
+            main,
+            [
+                "convert-ingest",
+                str(ingest_dir),
+                "--sample-name",
+                "Cu film",
+                "--sample-formula",
+                "Cu",
+                "--raw",
+                str(raw_file),
+                "--context",
+                "Operando measurement",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        record = json.loads((ingest_dir / "isaac_record_218386.json").read_text())
+        assert record["sample"]["material"]["name"] == "Cu film"
+        assert any(a.get("asset_id") == "raw_nexus_file" for a in record.get("assets", []))

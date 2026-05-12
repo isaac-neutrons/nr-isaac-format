@@ -232,6 +232,182 @@ def convert(manifest: Path, compact: bool, dry_run: bool) -> None:
             click.echo(f"  {path}")
 
 
+# ---------------------------------------------------------------------------
+# convert-ingest command
+# ---------------------------------------------------------------------------
+
+
+def _load_assembly_from_ingest(ingest_dir: Path):
+    """Reconstruct an AssemblyResult from a data-assembler ingest output dir.
+
+    Prefers JSON files (written when ingest is run with ``--json``); falls
+    back to the always-present Parquet files. Searches recursively so this
+    works for both the single-ingest layout (``<dir>/reflectivity/...``)
+    and the batch layout (``<dir>/json/<run>/...``).
+    """
+    from assembler.workflow import AssemblyResult
+
+    tables = ("reflectivity", "sample", "environment", "reflectivity_model")
+    loaded: dict[str, dict] = {}
+
+    json_root = ingest_dir / "json"
+    if json_root.is_dir():
+        for table in tables:
+            matches = sorted(json_root.rglob(f"{table}.json"))
+            if matches:
+                with open(matches[0]) as f:
+                    loaded[table] = json.load(f)
+
+    missing = [t for t in tables if t not in loaded and t in ("reflectivity",)]
+    if missing or not loaded:
+        # Fall back to Parquet for anything not already loaded from JSON.
+        # Use ParquetFile (not read_table) to read individual files without
+        # triggering Hive-partition auto-detection on the parent dirs.
+        import pyarrow.parquet as pq
+
+        for table in tables:
+            if table in loaded:
+                continue
+            table_dir = ingest_dir / table
+            matches = sorted(table_dir.rglob("*.parquet")) if table_dir.is_dir() else []
+            if not matches:
+                continue
+            records = pq.ParquetFile(str(matches[0])).read().to_pylist()
+            if records:
+                loaded[table] = records[0]
+
+    if "reflectivity" not in loaded:
+        raise click.ClickException(
+            f"No reflectivity output found in {ingest_dir} "
+            "(looked for json/reflectivity.json and reflectivity/*.parquet)"
+        )
+
+    return AssemblyResult(
+        reflectivity=loaded.get("reflectivity"),
+        sample=loaded.get("sample"),
+        environment=loaded.get("environment"),
+        reflectivity_model=loaded.get("reflectivity_model"),
+    )
+
+
+@main.command("convert-ingest")
+@click.argument("ingest_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Output path. May be a file or a directory; defaults to the ingest dir.",
+)
+@click.option("--compact", is_flag=True, help="Output compact JSON (no indentation)")
+@click.option("--dry-run", is_flag=True, help="Assemble but don't write output")
+@click.option("--sample-name", default=None, help="Sample name (overrides assembled composition)")
+@click.option(
+    "--sample-formula", default=None, help="Sample formula (overrides assembled composition)"
+)
+@click.option(
+    "--environment",
+    "environment_desc",
+    default=None,
+    help="Environment description (e.g. 'in_situ', 'operando').",
+)
+@click.option("--context", default=None, help="Free-text context description")
+@click.option("--raw", "raw_file", default=None, help="Path to the raw NeXus file")
+@click.option(
+    "--reduced",
+    "reduced_file",
+    default=None,
+    help="Path to the reduced data file (recorded as a reduction_product asset)",
+)
+def convert_ingest(
+    ingest_dir: Path,
+    output: Path | None,
+    compact: bool,
+    dry_run: bool,
+    sample_name: str | None,
+    sample_formula: str | None,
+    environment_desc: str | None,
+    context: str | None,
+    raw_file: str | None,
+    reduced_file: str | None,
+) -> None:
+    """Convert a data-assembler ingest output directory to an ISAAC record.
+
+    INGEST_DIR is the directory passed to ``data-assembler ingest --output``.
+    The JSON files (when written with ``--json``) are preferred; otherwise
+    the Parquet files are read.
+    One ISAAC AI-Ready Record is written.
+    """
+    try:
+        result = _load_assembly_from_ingest(ingest_dir)
+    except click.ClickException:
+        raise
+    except Exception as e:
+        click.echo(click.style(f"Error reading ingest output: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+    if reduced_file:
+        result.reduced_file = reduced_file
+
+    refl = result.reflectivity or {}
+    run_number = refl.get("run_number")
+    title = refl.get("run_title") or (f"run {run_number}" if run_number else ingest_dir.name)
+
+    click.echo(click.style(f"Converting: {title}", fg="cyan", bold=True))
+    if run_number:
+        click.echo(f"  Run: {run_number}")
+    click.echo(f"  Source: {ingest_dir}")
+
+    if result.sample:
+        click.echo(
+            f"  Sample: {result.sample.get('description', 'unknown')} "
+            f"({str(result.sample.get('id', ''))[:8]}...)"
+        )
+    if result.environment:
+        click.echo(f"  Environment: {result.environment.get('description', 'unknown')}")
+    if refl.get("q"):
+        click.echo(f"  Reflectivity: {len(refl['q'])} Q points")
+    click.echo()
+
+    writer = IsaacWriter()
+    record = writer.to_isaac(
+        result,
+        environment_description=environment_desc,
+        context_description=context,
+        raw_file_path=raw_file,
+        sample_name=sample_name,
+        sample_formula=sample_formula,
+    )
+
+    if dry_run:
+        click.echo(click.style("(dry run — not written)", fg="cyan"))
+        return
+
+    # Resolve output path: file vs directory
+    if output is None:
+        out_dir = ingest_dir
+        out_file = None
+    elif output.suffix == ".json":
+        out_dir = output.parent
+        out_file = output
+    else:
+        out_dir = output
+        out_file = None
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if out_file is None:
+        if run_number:
+            out_file = out_dir / f"isaac_record_{run_number}.json"
+        else:
+            out_file = out_dir / "isaac_record.json"
+
+    with open(out_file, "w") as f:
+        json.dump(record, f, indent=None if compact else 2, default=str)
+
+    click.echo(click.style(f"Wrote: {out_file}", fg="green"))
+
+
 def _find_latest_schema(schema_dir: Path) -> Path | None:
     """Find the latest bundled schema file, preferring ornl-rev variants."""
     import re
@@ -756,9 +932,8 @@ def _migrate_record_to_rev3(record: dict) -> bool:
         if snapshot_payload:
             inline = json.dumps(snapshot_payload, sort_keys=True)
             sha = hashlib.sha256(inline.encode("utf-8")).hexdigest()
-            uri = (
-                "data:application/json;base64,"
-                + base64.b64encode(inline.encode("utf-8")).decode("ascii")
+            uri = "data:application/json;base64," + base64.b64encode(inline.encode("utf-8")).decode(
+                "ascii"
             )
             assets = record.setdefault("assets", [])
             assets.append(
@@ -1070,9 +1245,7 @@ def migrate(paths: tuple[str, ...]) -> None:
         sys.exit(1)
 
     click.echo(
-        click.style(
-            f"Migrating {len(files)} record(s) to rev3 schema", fg="cyan", bold=True
-        )
+        click.style(f"Migrating {len(files)} record(s) to rev3 schema", fg="cyan", bold=True)
     )
     click.echo()
 
