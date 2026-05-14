@@ -291,7 +291,11 @@ def _load_assembly_from_ingest(ingest_dir: Path):
 
 
 @main.command("convert-ingest")
-@click.argument("ingest_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument(
+    "ingest_dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    required=False,
+)
 @click.option(
     "--output",
     "-o",
@@ -319,8 +323,25 @@ def _load_assembly_from_ingest(ingest_dir: Path):
     default=None,
     help="Path to the reduced data file (recorded as a reduction_product asset)",
 )
+@click.option(
+    "--state-in",
+    "state_in",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Read a v1 workflow-state JSON. Missing INGEST_DIR / --raw / --reduced "
+    "are filled from assembly.metadata.ingest_dir (or paths.assembled_directory) / "
+    "paths.raw_data / reduction.result_file.",
+)
+@click.option(
+    "--state-out",
+    "state_out",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Write a v1 workflow-state JSON with the assembly outcome "
+    "(assembly.success, assembly.isaac_record).",
+)
 def convert_ingest(
-    ingest_dir: Path,
+    ingest_dir: Path | None,
     output: Path | None,
     compact: bool,
     dry_run: bool,
@@ -330,6 +351,8 @@ def convert_ingest(
     context: str | None,
     raw_file: str | None,
     reduced_file: str | None,
+    state_in: str | None,
+    state_out: str | None,
 ) -> None:
     """Convert a data-assembler ingest output directory to an ISAAC record.
 
@@ -338,11 +361,59 @@ def convert_ingest(
     the Parquet files are read.
     One ISAAC AI-Ready Record is written.
     """
+    # Resolve missing inputs from --state-in (v1 workflow state).
+    from assembler.state import (
+        empty_state,
+        load_state,
+        record_error,
+        save_state,
+        update_stage,
+        _path,
+    )
+
+    wstate: dict = load_state(state_in) if state_in else empty_state()
+    if state_in:
+        if ingest_dir is None:
+            asm_meta = (wstate.get("assembly") or {}).get("metadata") or {}
+            candidate = (
+                asm_meta.get("ingest_dir")
+                or _path(wstate, "assembled_directory")
+                or None
+            )
+            if not candidate:
+                base = _path(wstate, "output_directory")
+                if base:
+                    candidate = str(Path(base) / "assembled")
+            if candidate:
+                ingest_dir = Path(candidate)
+        if raw_file is None:
+            raw_file = (
+                _path(wstate, "raw_data") or _path(wstate, "event_file") or None
+            )
+        if reduced_file is None:
+            reduced_file = (wstate.get("reduction") or {}).get("result_file") or None
+
+    if ingest_dir is None:
+        raise click.UsageError(
+            "INGEST_DIR is required (or supply assembly.metadata.ingest_dir / "
+            "paths.assembled_directory via --state-in)."
+        )
+    if not ingest_dir.is_dir():
+        raise click.UsageError(f"INGEST_DIR does not exist: {ingest_dir}")
+
     try:
         result = _load_assembly_from_ingest(ingest_dir)
     except click.ClickException:
+        if state_out is not None:
+            update_stage(wstate, "assembly", success=False)
+            record_error(wstate, "assembly", "convert-ingest failed to read ingest dir")
+            save_state(wstate, state_out)
         raise
     except Exception as e:
+        if state_out is not None:
+            update_stage(wstate, "assembly", success=False)
+            record_error(wstate, "assembly", f"convert-ingest error: {e}")
+            save_state(wstate, state_out)
         click.echo(click.style(f"Error reading ingest output: {e}", fg="red"), err=True)
         sys.exit(1)
 
@@ -406,6 +477,20 @@ def convert_ingest(
         json.dump(record, f, indent=None if compact else 2, default=str)
 
     click.echo(click.style(f"Wrote: {out_file}", fg="green"))
+
+    if state_out is not None:
+        update_stage(
+            wstate,
+            "assembly",
+            success=True,
+            isaac_record=str(out_file.resolve()),
+            metadata={
+                "isaac_status": "converted",
+                "ingest_dir": str(ingest_dir.resolve()),
+            },
+        )
+        save_state(wstate, state_out)
+        click.echo(click.style(f"State written: {Path(state_out).resolve()}", fg="green"))
 
 
 def _find_latest_schema(schema_dir: Path) -> Path | None:
