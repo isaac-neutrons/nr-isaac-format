@@ -26,7 +26,7 @@ dependencies = [
     # Pinned to a known-good data-assembler commit (was tracking the default
     # branch). Bump deliberately; keep in lockstep with the AssemblyResult /
     # assembler.parsers API that convert-ingest imports.
-    "data-assembler @ git+https://github.com/isaac-neutrons/data-assembler.git@56060042e8b4c938720acbdf17252cdf07f1744a",
+    "data-assembler @ git+https://github.com/isaac-neutrons/data-assembler.git",
     "jsonschema>=4.0",
     "python-ulid>=2.0",
     "click>=8.0",
