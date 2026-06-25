@@ -283,7 +283,7 @@ Each ISAAC record is a JSON file conforming to the ISAAC AI-Ready Scientific Rec
 | `measurement` | Q/R/dR/dQ reflectivity series, QC status, and a free-text `series[].notes` describing how the measurement was made |
 | `descriptors` | Computed descriptors: q-range, total points, geometry, etc. |
 | `sample` | Composition, sample form (`film`), provenance, and free-text `material.notes` |
-| `context` | Environment enum, temperature, thermodynamics, and `electrochemistry` (control mode + applied potential parsed from the description; defaults to the SHE scale) |
+| `context` | Environment enum, temperature, thermodynamics, and `electrochemistry`. When the assembler supplies structured conditions (control_mode, potential, scale, pH, electrolyte) they are used directly; otherwise applied potentials are parsed from the description (defaulting to the SHE scale) |
 | `system` | Instrument, facility, configuration |
 | `assets` | Raw NeXus file pointer, reduced data file with SHA-256 |
 

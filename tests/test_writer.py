@@ -625,6 +625,70 @@ class TestFitDescriptors:
         assert record["descriptors"]["outputs"][0]["label"].startswith("automated_extraction")
 
 
+class TestStructuredElectrochemistry:
+    """context.electrochemistry built from the assembler's structured env fields."""
+
+    def test_structured_fields_mapped(self):
+        result = create_mock_result(
+            reflectivity={"facility": "SNS", "q": [0.01], "r": [0.9]},
+            environment={
+                "description": "OCV measurement in D2O electrolyte (pH 8.25, 0.1 M NaHCO3)",
+                "control_mode": "open_circuit",
+                "potential": None,
+                "potential_scale": None,
+                "pH": 8.25,
+                "electrolyte": {"name": "NaHCO3", "concentration_M": 0.1},
+            },
+        )
+        ec = IsaacWriter().to_isaac(result)["context"]["electrochemistry"]
+        assert ec["control_mode"] == "open_circuit"
+        assert ec["pH"] == 8.25
+        assert ec["electrolyte"] == {"name": "NaHCO3", "concentration_M": 0.1}
+        assert "potential_setpoint_V" not in ec  # OCV: no setpoint
+
+    def test_structured_potential_setpoint(self):
+        result = create_mock_result(
+            reflectivity={"facility": "SNS", "q": [0.01], "r": [0.9]},
+            environment={
+                "description": "held at -1 V",
+                "control_mode": "potentiostatic",
+                "potential": -1.0,
+                "potential_scale": "RHE",
+            },
+        )
+        ec = IsaacWriter().to_isaac(result)["context"]["electrochemistry"]
+        assert ec == {
+            "control_mode": "potentiostatic",
+            "potential_setpoint_V": -1.0,
+            "potential_scale": "RHE",
+        }
+
+    def test_structured_overrides_text_parsing(self):
+        # structured control_mode wins; the "-1 V vs RHE" text is NOT re-parsed
+        result = create_mock_result(
+            reflectivity={"facility": "SNS", "q": [0.01], "r": [0.9]},
+            environment={"description": "held at -1 V vs RHE", "control_mode": "open_circuit"},
+        )
+        ec = IsaacWriter().to_isaac(result)["context"]["electrochemistry"]
+        assert ec == {"control_mode": "open_circuit"}
+
+    def test_electrolyte_without_concentration_is_dropped(self):
+        # rev4 requires concentration_M; an electrolyte lacking it is omitted, and
+        # with no other structured signal we fall back to text parsing (none here).
+        result = create_mock_result(
+            reflectivity={"facility": "SNS", "q": [0.01], "r": [0.9]},
+            environment={"description": "in D2O", "electrolyte": {"name": "NaHCO3"}},
+        )
+        ec = IsaacWriter().to_isaac(result)["context"].get("electrochemistry")
+        assert ec is None
+
+    def test_falls_back_to_text_when_no_structured_fields(self):
+        # manifest/plan path: env has no structured fields → free-text parsing
+        result = create_mock_result(reflectivity={"facility": "SNS", "q": [0.01], "r": [0.9]})
+        record = IsaacWriter().to_isaac(result, context_description="At OCV in electrolyte")
+        assert record["context"]["electrochemistry"] == {"control_mode": "open_circuit"}
+
+
 class TestSchemaValidation:
     """Guard: writer output must validate against the latest bundled schema."""
 
@@ -649,7 +713,16 @@ class TestSchemaValidation:
                 "measurement_geometry": "back reflection",
             },
             sample={"main_composition": "Cu", "provenance": "commercial", "layers": []},
-            environment={"temperature": 298.0, "ambient_medium": "D2O"},
+            environment={
+                "temperature": 298.0,
+                "ambient_medium": "D2O",
+                "description": "operando NR at -1 V vs RHE",
+                "control_mode": "potentiostatic",
+                "potential": -1.0,
+                "potential_scale": "RHE",
+                "pH": 8.25,
+                "electrolyte": {"name": "NaHCO3", "concentration_M": 0.1},
+            },
             reflectivity_model={
                 "software": "refl1d",
                 "software_version": "1.0.1",
@@ -679,9 +752,12 @@ class TestSchemaValidation:
         first_unc = record["descriptors"]["outputs"][0]["descriptors"][0]["uncertainty"]
         assert first_unc == {"sigma": None}
         assert "policy" not in record["descriptors"]
-        # Parsed applied potential lands in the typed electrochemistry block.
+        # Structured conditions (incl. pH + electrolyte) map into electrochemistry
+        # and validate against rev4.
         assert record["context"]["electrochemistry"] == {
             "control_mode": "potentiostatic",
             "potential_setpoint_V": -1.0,
             "potential_scale": "RHE",
+            "pH": 8.25,
+            "electrolyte": {"name": "NaHCO3", "concentration_M": 0.1},
         }

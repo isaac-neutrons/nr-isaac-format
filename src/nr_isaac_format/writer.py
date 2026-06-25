@@ -121,10 +121,13 @@ class IsaacWriter:
                 material["notes"] = sample_name
             record["sample"] = {"sample_form": "film", "material": material}
 
-        # Context block (rev3/rev4: typed fields only). Applied-potential info
-        # (OCV, "-1 V", …) is parsed from the free-text description into the
-        # typed context.electrochemistry block, defaulting to the SHE scale.
-        electrochemistry = self._parse_electrochemistry(measurement_description)
+        # Context block (rev3/rev4: typed fields only). Prefer the data-assembler's
+        # structured electrochemical conditions (control_mode/potential/electrolyte/
+        # pH); fall back to parsing the free-text description (manifest/plan paths
+        # where the assembler did not populate structured fields).
+        electrochemistry = self._electrochemistry_from_env(env)
+        if not electrochemistry:
+            electrochemistry = self._parse_electrochemistry(measurement_description)
         if env or electrochemistry:
             context_block = self._map_context(
                 env, description=measurement_description, electrochemistry=electrochemistry
@@ -650,7 +653,36 @@ class IsaacWriter:
 
         return result
 
-    # --- Electrochemistry parsing -------------------------------------------
+    # --- Electrochemistry ----------------------------------------------------
+
+    def _electrochemistry_from_env(self, env: dict) -> dict[str, Any] | None:
+        """Build context.electrochemistry from the assembler's structured fields.
+
+        The data-assembler is the canonical home for condition parsing; when it
+        has populated structured fields on the environment record we map them
+        directly (no text re-parsing). Returns ``None`` when none are present, so
+        the caller can fall back to free-text parsing for the manifest/plan paths.
+        """
+        env = env or {}
+        ec: dict[str, Any] = {}
+
+        if env.get("control_mode"):
+            ec["control_mode"] = env["control_mode"]
+        if env.get("potential") is not None:
+            ec["potential_setpoint_V"] = env["potential"]
+        if env.get("potential_scale"):
+            ec["potential_scale"] = env["potential_scale"]
+        if env.get("pH") is not None:
+            ec["pH"] = env["pH"]
+
+        electrolyte = env.get("electrolyte")
+        if isinstance(electrolyte, dict) and electrolyte.get("name"):
+            # rev4 requires both name and concentration_M on an electrolyte.
+            conc = electrolyte.get("concentration_M")
+            if conc is not None:
+                ec["electrolyte"] = {"name": electrolyte["name"], "concentration_M": conc}
+
+        return ec or None
 
     # Numeric applied potential, e.g. "-1 V", "+0.5 V", "0 V", "1.23V"
     # (ASCII or unicode-minus sign accepted).
