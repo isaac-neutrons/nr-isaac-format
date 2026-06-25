@@ -29,6 +29,7 @@ def create_mock_result(
     sample: dict | None = None,
     environment: dict | None = None,
     reduced_file: str | None = None,
+    reflectivity_model: dict | None = None,
 ):
     """Create a mock AssemblyResult for testing."""
     mock = MagicMock()
@@ -36,6 +37,7 @@ def create_mock_result(
     mock.sample = sample
     mock.environment = environment
     mock.reduced_file = reduced_file
+    mock.reflectivity_model = reflectivity_model
     mock.parquet_dir = None
     mock.model_file = None
     mock.warnings = []
@@ -555,6 +557,74 @@ class TestSampleFromManifest:
         assert record["sample"]["material"]["formula"] == "THF | CuOx | Cu | Ti | Si"
 
 
+class TestFitDescriptors:
+    """Fitted reflectivity_model → model-derived descriptors (kind: model)."""
+
+    def _result_with_model(self, chi_squared=None):
+        return create_mock_result(
+            reflectivity={"facility": "SNS", "q": [0.01, 0.02], "r": [0.9, 0.8]},
+            reflectivity_model={
+                "software": "refl1d",
+                "software_version": "1.0.1",
+                "chi_squared": chi_squared,
+                "layers": [
+                    # ambient: thickness 0 (semi-infinite) but a real interface roughness
+                    {"layer_number": 1, "name": "air", "thickness": 0.0,
+                     "interface": 12.1, "interface_std": None, "sld": 0.0, "sld_std": None},
+                    {"layer_number": 2, "name": "copper oxide", "thickness": 24.8,
+                     "thickness_std": 1.5, "interface": 12.9, "interface_std": 2.1,
+                     "sld": 4.55, "sld_std": 0.07},
+                    {"layer_number": 3, "name": "Cu", "thickness": 371.3,
+                     "thickness_std": 4.76, "interface": 5.6, "interface_std": 1.2,
+                     "sld": 6.565, "sld_std": 0.0073},
+                ],
+            },
+        )
+
+    def _fit_output(self, record):
+        outs = [o for o in record["descriptors"]["outputs"] if o["label"] == "reflectivity_model_fit"]
+        return outs[0] if outs else None
+
+    def test_fitted_layers_become_model_descriptors(self):
+        record = IsaacWriter().to_isaac(self._result_with_model())
+        out = self._fit_output(record)
+        assert out is not None
+        assert out["generated_by"] == {"agent": "refl1d", "version": "1.0.1"}
+        by_name = {d["name"]: d for d in out["descriptors"]}
+
+        # ambient thickness (0) skipped, but its roughness + sld are kept
+        assert "air_thickness" not in by_name
+        assert "air_roughness" in by_name
+
+        # spaces sanitized; fitted value + σ carried; kind/source are model/imported
+        cu_t = by_name["copper_oxide_thickness"]
+        assert cu_t["value"] == 24.8
+        assert cu_t["kind"] == "model"
+        assert cu_t["source"] == "imported"
+        assert cu_t["uncertainty"] == {"sigma": 1.5}
+        assert by_name["Cu_thickness"]["value"] == 371.3
+        assert by_name["Cu_thickness"]["uncertainty"] == {"sigma": 4.76}
+        assert by_name["Cu_sld"]["unit"] == "1e-6 Å⁻²"
+        # σ absent → sigma None, not dropped
+        assert by_name["air_roughness"]["uncertainty"] == {"sigma": None}
+
+    def test_chi_squared_descriptor_when_present(self):
+        record = IsaacWriter().to_isaac(self._result_with_model(chi_squared=1.143))
+        out = self._fit_output(record)
+        names = {d["name"] for d in out["descriptors"]}
+        assert "reduced_chi_squared" in names
+        chi = next(d for d in out["descriptors"] if d["name"] == "reduced_chi_squared")
+        assert chi["value"] == 1.143
+
+    def test_no_model_no_fit_output(self):
+        record = IsaacWriter().to_isaac(
+            create_mock_result(reflectivity={"facility": "SNS", "q": [0.01], "r": [0.9]})
+        )
+        assert self._fit_output(record) is None
+        # the automated-extraction output is still present
+        assert record["descriptors"]["outputs"][0]["label"].startswith("automated_extraction")
+
+
 class TestSchemaValidation:
     """Guard: writer output must validate against the latest bundled schema."""
 
@@ -580,6 +650,16 @@ class TestSchemaValidation:
             },
             sample={"main_composition": "Cu", "provenance": "commercial", "layers": []},
             environment={"temperature": 298.0, "ambient_medium": "D2O"},
+            reflectivity_model={
+                "software": "refl1d",
+                "software_version": "1.0.1",
+                "chi_squared": 1.143,
+                "layers": [
+                    {"layer_number": 1, "name": "copper oxide", "thickness": 24.8,
+                     "thickness_std": 1.5, "interface": 12.9, "interface_std": 2.1,
+                     "sld": 4.55, "sld_std": 0.07},
+                ],
+            },
         )
         writer = IsaacWriter()
         record = writer.to_isaac(
@@ -589,6 +669,9 @@ class TestSchemaValidation:
         )
 
         jsonschema.validate(record, schema)  # raises on any rev4 violation
+        # fitted-model descriptors are present and schema-valid
+        fit = [o for o in record["descriptors"]["outputs"] if o["label"] == "reflectivity_model_fit"]
+        assert fit and any(d["name"] == "reduced_chi_squared" for d in fit[0]["descriptors"])
 
         # Spot-check the rev4 homes for the free-text descriptions and fixes.
         assert record["measurement"]["series"][0]["notes"].startswith("Operando")

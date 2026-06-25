@@ -65,19 +65,154 @@ def main() -> None:
     pass
 
 
+def _convert_plan(
+    plan: dict,
+    output_dir: Path,
+    data_dir: Path,
+    compact: bool,
+    dry_run: bool,
+) -> list[Path]:
+    """Convert a pre-fit ``plan.yaml`` (describe/states/...) to ISAAC records.
+
+    Each ``state`` becomes one record built from its primary reduced data file
+    (the first entry in ``state.data``, resolved against *data_dir*). A plan is
+    pre-fit, so no model is assembled: the reflectivity curve, the sample
+    ``describe`` text (→ ``sample.material.notes``) and the per-state
+    ``extra_description`` (→ ``measurement.series[].notes`` + parsed potential)
+    are recorded.
+    """
+    from assembler.parsers import ReducedParser
+    from assembler.workflow import DataAssembler
+
+    describe = plan.get("describe")
+    states = plan.get("states") or []
+    if not states:
+        raise click.ClickException("Plan has no 'states' to convert.")
+
+    reduced_parser = ReducedParser()
+    assembler = DataAssembler()
+    written: list[Path] = []
+    sample_id: Optional[str] = None
+
+    for i, state in enumerate(states):
+        name = state.get("name") or f"state_{i + 1}"
+        click.echo(click.style(f"[{i + 1}/{len(states)}] {name}", fg="cyan"))
+
+        data_files = state.get("data") or []
+        if not data_files:
+            raise click.ClickException(f"State '{name}' has no data files.")
+
+        # A state's data files are partial Q-ranges of one measurement; use the
+        # first (primary) partial as the reduced curve, mirroring the manifest flow.
+        reduced_path = data_dir / data_files[0]
+        if not reduced_path.is_file():
+            raise click.ClickException(f"Data file not found: {reduced_path}")
+        if len(data_files) > 1:
+            click.echo(
+                click.style(
+                    f"  Note: {len(data_files)} partial files listed; using primary "
+                    f"{reduced_path.name} (siblings not merged).",
+                    fg="yellow",
+                )
+            )
+
+        extra = state.get("extra_description")
+        try:
+            reduced_data = reduced_parser.parse(str(reduced_path))
+        except Exception as e:
+            raise click.ClickException(f"Error parsing reduced file {reduced_path}: {e}")
+
+        result = assembler.assemble(
+            reduced=reduced_data,
+            model=None,
+            environment_description=extra,
+            sample_id=sample_id,
+        )
+        if result.has_errors:
+            for error in result.errors:
+                click.echo(click.style(f"    - {error}", fg="red"), err=True)
+            raise click.ClickException(f"Assembly failed for state '{name}'.")
+        for warning in result.warnings:
+            click.echo(click.style(f"  Warning: {warning}", fg="yellow"), err=True)
+
+        if i == 0 and result.sample:
+            sample_id = result.sample.get("id")
+
+        # The plan declares back-reflection geometry; surface it for descriptors.
+        # (The assembler leaves measurement_geometry as None without a model.)
+        if state.get("back_reflection") and result.reflectivity is not None:
+            if not result.reflectivity.get("measurement_geometry"):
+                result.reflectivity["measurement_geometry"] = "back reflection"
+
+        refl = result.reflectivity or {}
+        run_number = refl.get("run_number")
+        click.echo(f"  Reflectivity: run {run_number}, {len(refl.get('q', []))} Q points")
+
+        record = IsaacWriter().to_isaac(
+            result,
+            context_description=extra,
+            sample_name=describe,
+        )
+
+        if dry_run:
+            click.echo(click.style("  (dry run — not written)", fg="cyan"))
+            click.echo()
+            continue
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if run_number:
+            filename = f"isaac_record_{run_number}.json"
+        else:
+            safe = name.lower().replace(" ", "_")
+            filename = f"isaac_record_{i + 1:02d}_{safe}.json"
+        file_path = output_dir / filename
+        with open(file_path, "w") as f:
+            json.dump(record, f, indent=None if compact else 2, default=str)
+        written.append(file_path)
+        click.echo(f"  Wrote: {file_path}")
+        click.echo()
+
+    return written
+
+
 @main.command()
-@click.argument("manifest", type=click.Path(exists=True, path_type=Path))
+@click.argument("input_file", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "-o",
+    "--output",
+    "output_dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Output directory for ISAAC records. Required for a plan.yaml; "
+    "overrides a manifest's `output:` field when given.",
+)
+@click.option(
+    "-d",
+    "--data-dir",
+    "data_dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Directory holding the reduced data files. Required for a plan.yaml.",
+)
 @click.option("--compact", is_flag=True, help="Output compact JSON (no indentation)")
 @click.option("--dry-run", is_flag=True, help="Parse and assemble but don't write output")
-def convert(manifest: Path, compact: bool, dry_run: bool) -> None:
-    """Convert measurements described in a YAML manifest to ISAAC format.
+def convert(
+    input_file: Path,
+    output_dir: Path | None,
+    data_dir: Path | None,
+    compact: bool,
+    dry_run: bool,
+) -> None:
+    """Convert a manifest.yaml or a plan.yaml to ISAAC AI-Ready Records.
 
-    MANIFEST is a YAML file describing a sample and its measurement history.
-    Each measurement produces one ISAAC AI-Ready Record JSON file.
+    INPUT_FILE is either a fitted-result *manifest* (sample + measurements with
+    models) or a pre-fit *plan* (describe + states). The format is detected
+    automatically. Each measurement/state produces one ISAAC record.
 
     Example:
 
         nr-isaac-format convert expt_34347.yaml
+        nr-isaac-format convert plan/job_230539.yaml -d Rawdata/ -o records/
 
     \b
     Manifest format:
@@ -85,17 +220,56 @@ def convert(manifest: Path, compact: bool, dry_run: bool) -> None:
         sample:
           description: "Sample description"
           model: /path/to/model.json
-          model_dataset_index: 1
         output: /path/to/output/
         measurements:
           - name: "Measurement 1"
             reduced: /path/to/reduced.txt
-            parquet: /path/to/parquet/       # optional
-            model: /path/to/model.json       # optional (overrides sample.model)
-            model_dataset_index: 1           # optional
             environment: "Description text"  # optional
+
+    \b
+    Plan format (pre-fit; needs -d for data and -o for output):
+        describe: "Sample stack description"
+        states:
+          - name: run_230539
+            data: [REFL_230539_1_230539_partial.txt, ...]
+            back_reflection: true
+            extra_description: "OCV measurement in D2O electrolyte, ..."
     """
     import yaml
+
+    raw_yaml = yaml.safe_load(input_file.read_text())
+    if not isinstance(raw_yaml, dict):
+        click.echo(click.style(f"Error: {input_file} is not a YAML mapping.", fg="red"), err=True)
+        sys.exit(1)
+
+    # --- plan.yaml path (pre-fit: describe + states[]) ---
+    if "states" in raw_yaml:
+        if data_dir is None:
+            raise click.UsageError(
+                "A plan file requires -d/--data-dir (the directory holding the reduced data files)."
+            )
+        if output_dir is None:
+            raise click.UsageError("A plan file requires -o/--output (the output directory).")
+
+        title = raw_yaml.get("describe") or input_file.stem
+        click.echo(click.style(f"Converting plan: {title}", fg="cyan", bold=True))
+        click.echo(f"  Data dir: {data_dir}")
+        click.echo(f"  Output: {output_dir}")
+        click.echo(f"  States: {len(raw_yaml.get('states') or [])}")
+        click.echo()
+
+        written = _convert_plan(raw_yaml, output_dir, data_dir, compact, dry_run)
+
+        click.echo(click.style("─" * 50, fg="cyan"))
+        if dry_run:
+            click.echo(click.style("Dry run complete — no files written", fg="cyan"))
+        else:
+            click.echo(click.style(f"Wrote {len(written)} ISAAC record(s):", fg="green"))
+            for path in written:
+                click.echo(f"  {path}")
+        return
+
+    # --- manifest.yaml path ---
     from assembler.parsers import ManifestParser, ModelParser, ParquetParser, ReducedParser
     from assembler.tools.detection import extract_run_number
     from assembler.workflow import DataAssembler
@@ -103,14 +277,11 @@ def convert(manifest: Path, compact: bool, dry_run: bool) -> None:
     # Parse manifest
     parser = ManifestParser()
     try:
-        manifest_data = parser.parse(manifest)
+        manifest_data = parser.parse(input_file)
     except Exception as e:
         click.echo(click.style(f"Error parsing manifest: {e}", fg="red"), err=True)
         sys.exit(1)
 
-    # Load raw YAML to extract extra fields not in ManifestMeasurement
-    with open(manifest) as f:
-        raw_yaml = yaml.safe_load(f)
     raw_measurements = raw_yaml.get("measurements", [])
 
     # Validate
@@ -121,13 +292,14 @@ def convert(manifest: Path, compact: bool, dry_run: bool) -> None:
             click.echo(f"  - {error}", err=True)
         sys.exit(1)
 
-    title = manifest_data.title or manifest.stem
+    # -o overrides the manifest's own output directory when supplied.
+    output_path = output_dir or Path(manifest_data.output)
+
+    title = manifest_data.title or input_file.stem
     click.echo(click.style(f"Converting: {title}", fg="cyan", bold=True))
-    click.echo(f"  Output: {manifest_data.output}")
+    click.echo(f"  Output: {output_path}")
     click.echo(f"  Measurements: {len(manifest_data.measurements)}")
     click.echo()
-
-    output_path = Path(manifest_data.output)
 
     reduced_parser = ReducedParser()
     parquet_parser = ParquetParser()

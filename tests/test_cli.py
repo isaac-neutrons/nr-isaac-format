@@ -955,5 +955,71 @@ class TestHelpListing:
         # Full summaries appear verbatim (collapse wrapping whitespace first,
         # since narrow widths wrap continuation lines onto the next row).
         normalized = " ".join(result.output.split())
-        assert "Convert measurements described in a YAML manifest to ISAAC format." in normalized
+        assert "Convert a manifest.yaml or a plan.yaml to ISAAC AI-Ready Records." in normalized
         assert "Regenerate ISAAC records from a manifest using the latest writer and schema." in normalized
+
+
+class TestConvertPlanCommand:
+    """Tests for converting a pre-fit plan.yaml via the convert command."""
+
+    def _write_plan(self, tmp_path):
+        plan = tmp_path / "job_230539.yaml"
+        plan.write_text(
+            "describe: D2O / Cu oxide / 50 nm Cu / 3 nm Ti on Si\n"
+            "states:\n"
+            "- name: run_230539\n"
+            "  data:\n"
+            "  - REFL_230539_1_230539_partial.txt\n"
+            "  - REFL_230539_2_230540_partial.txt\n"
+            "  back_reflection: true\n"
+            "  extra_description: OCV measurement in D2O electrolyte.\n"
+        )
+        data_dir = tmp_path / "Rawdata"
+        data_dir.mkdir()
+        (data_dir / "REFL_230539_1_230539_partial.txt").write_text("# dummy\n")
+        (data_dir / "REFL_230539_2_230540_partial.txt").write_text("# dummy\n")
+        return plan, data_dir
+
+    @patch("nr_isaac_format.cli.IsaacWriter")
+    def test_convert_plan(self, mock_writer_cls, runner, tmp_path):
+        plan, data_dir = self._write_plan(tmp_path)
+        out_dir = tmp_path / "records"
+
+        mock_result = _make_mock_result(has_sample=False)
+        mock_result.reflectivity = {"run_number": 230539, "q": [0.01, 0.02], "facility": "SNS"}
+        mock_writer = MagicMock()
+        mock_writer.to_isaac.return_value = {"isaac_record_version": "1.05", "record_id": "X"}
+        mock_writer_cls.return_value = mock_writer
+
+        with (
+            patch("assembler.parsers.ReducedParser") as mock_reduced_cls,
+            patch("assembler.workflow.DataAssembler") as mock_assembler_cls,
+        ):
+            mock_reduced_cls.return_value.parse.return_value = MagicMock()
+            mock_assembler_cls.return_value.assemble.return_value = mock_result
+
+            result = runner.invoke(
+                main, ["convert", str(plan), "-d", str(data_dir), "-o", str(out_dir)]
+            )
+
+        assert result.exit_code == 0, result.output
+        # describe → sample_name; extra_description → context_description
+        kwargs = mock_writer.to_isaac.call_args.kwargs
+        assert kwargs["sample_name"] == "D2O / Cu oxide / 50 nm Cu / 3 nm Ti on Si"
+        assert kwargs["context_description"] == "OCV measurement in D2O electrolyte."
+        # back_reflection injected as geometry on the reflectivity
+        assert mock_result.reflectivity.get("measurement_geometry") == "back reflection"
+        # record written, named by run number
+        assert (out_dir / "isaac_record_230539.json").exists()
+
+    def test_convert_plan_requires_data_dir(self, runner, tmp_path):
+        plan, _ = self._write_plan(tmp_path)
+        result = runner.invoke(main, ["convert", str(plan), "-o", str(tmp_path / "out")])
+        assert result.exit_code != 0
+        assert "data-dir" in result.output
+
+    def test_convert_plan_requires_output(self, runner, tmp_path):
+        plan, data_dir = self._write_plan(tmp_path)
+        result = runner.invoke(main, ["convert", str(plan), "-d", str(data_dir)])
+        assert result.exit_code != 0
+        assert "output" in result.output

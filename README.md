@@ -101,16 +101,26 @@ nr-isaac-format push output/ --validate-only
 
 ### `nr-isaac-format convert`
 
-Convert measurements described in a YAML manifest to ISAAC format.
+Convert a YAML **manifest** (fitted result) or a YAML **plan** (pre-fit) to ISAAC records. The format is detected automatically.
 
 ```bash
-nr-isaac-format convert [OPTIONS] MANIFEST
+nr-isaac-format convert [OPTIONS] INPUT_FILE
 ```
 
 | Option | Description |
 |--------|-------------|
+| `-o, --output DIR` | Output directory. Required for a plan; overrides a manifest's `output:` when given. |
+| `-d, --data-dir DIR` | Directory holding the reduced data files. Required for a plan. |
 | `--compact` | Output compact JSON (no indentation) |
 | `--dry-run` | Parse and assemble but don't write output |
+
+```bash
+# manifest (fitted result, paths/output in the file)
+nr-isaac-format convert experiment.yaml
+
+# plan (pre-fit; bare data filenames resolved against -d, written under -o)
+nr-isaac-format convert plan/job_230539.yaml -d Rawdata/ -o records/
+```
 
 ### `nr-isaac-format validate`
 
@@ -185,6 +195,32 @@ nr-isaac-format fetch-schema [OPTIONS]
 | `raw` | No | Path to raw NeXus file (→ `assets[]` with `content_role: "raw_data_pointer"`) |
 
 The first measurement's model is used to create the sample record. All subsequent measurements reuse the same sample ID.
+
+## Plan Format
+
+A **plan** is a pre-fit job spec (no fitted model yet). `convert` accepts it directly with `-d` (where the reduced data files live) and `-o` (output directory). Each `state` becomes one ISAAC record built from its **primary** reduced data file (the first entry in `data`; sibling partials are not merged).
+
+```yaml
+describe: "D2O / Cu oxide / 50 nm Cu / 3 nm Ti on Si. Beam enters from the Si substrate side."
+states:
+  - name: run_230539
+    data:                       # bare filenames; resolved against -d
+      - REFL_230539_1_230539_partial.txt
+      - REFL_230539_2_230540_partial.txt
+    back_reflection: true       # → measurement_geometry descriptor
+    extra_description: "OCV measurement in D2O electrolyte (pH 8.25, 0.1 M NaHCO3, N2 sparged)."
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `describe` | No | Sample stack description (→ `sample.material.notes`) |
+| `states` | Yes | List of measurement states (one record each) |
+| `states[].name` | Yes | State name (used for the filename when no run number) |
+| `states[].data` | Yes | Reduced data filenames; the first is used as the primary curve |
+| `states[].back_reflection` | No | When true, sets the `measurement_geometry` descriptor |
+| `states[].extra_description` | No | Measurement context (→ `measurement.series[].notes`; potentials parsed into `context.electrochemistry`) |
+
+Because a plan is pre-fit, no layer model is assembled — the record captures the measured reflectivity, the sample/measurement descriptions, and any applied potential, but not fitted layer parameters.
 
 ## Environment Configuration
 
