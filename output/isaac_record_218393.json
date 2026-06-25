@@ -2970,7 +2970,8 @@
               0.0076000637366052
             ]
           }
-        ]
+        ],
+        "notes": "Electrochemical cell, THF electrolyte, final OCV"
       }
     ],
     "qc": {
@@ -2978,9 +2979,6 @@
     }
   },
   "descriptors": {
-    "policy": {
-      "requires_at_least_one": true
-    },
     "outputs": [
       {
         "label": "automated_extraction_2026-05-04",
@@ -2997,7 +2995,7 @@
             "value": 0.010486523286646,
             "unit": "\u00c5\u207b\u00b9",
             "uncertainty": {
-              "type": "none"
+              "sigma": null
             }
           },
           {
@@ -3007,7 +3005,7 @@
             "value": 0.2750438737903252,
             "unit": "\u00c5\u207b\u00b9",
             "uncertainty": {
-              "type": "none"
+              "sigma": null
             }
           },
           {
@@ -3017,7 +3015,7 @@
             "value": 732,
             "unit": "count",
             "uncertainty": {
-              "type": "none"
+              "sigma": null
             }
           },
           {
@@ -3026,7 +3024,7 @@
             "source": "auto",
             "value": "back reflection",
             "uncertainty": {
-              "type": "none"
+              "sigma": null
             }
           }
         ]
@@ -3042,7 +3040,10 @@
   },
   "context": {
     "environment": "operando",
-    "temperature_K": 295.0
+    "temperature_K": 295.0,
+    "electrochemistry": {
+      "control_mode": "open_circuit"
+    }
   },
   "system": {
     "domain": "experimental",
@@ -3067,8 +3068,8 @@
       "asset_id": "context_metadata_snapshot",
       "content_role": "metadata_snapshot",
       "media_type": "application/json",
-      "uri": "data:application/json;base64,eyJhbWJpZW50X21lZGl1bSI6ICJUSEYiLCAiZGVzY3JpcHRpb24iOiAiRWxlY3Ryb2NoZW1pY2FsIGNlbGwsIFRIRiBlbGVjdHJvbHl0ZSwgZmluYWwgT0NWIn0=",
-      "sha256": "20c1270f3e5cc3e5d6aaec157cf8652de179d5c817959fbaa17a9fef181991b7"
+      "uri": "data:application/json;base64,eyJhbWJpZW50X21lZGl1bSI6ICJUSEYifQ==",
+      "sha256": "153bb4968dc007075068fee2526d776cb504ce677f8ac6cbca46485d99ebb3b9"
     }
   ]
 }

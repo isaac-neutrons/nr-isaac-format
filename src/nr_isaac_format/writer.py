@@ -3,13 +3,14 @@ ISAAC AI-Ready Record Writer
 
 Minimal writer following the data-assembler pattern.
 Converts AssemblyResult to ISAAC AI-Ready Scientific Record (schema
-revision ``v1-ornl-rev3``) format.
+revision ``v1-ornl-rev4``) format.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ def _b64(text: str) -> str:
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 # Schema revision this writer targets. Bump when updating for a new schema.
-SCHEMA_REVISION = "v1-ornl-rev3"
+SCHEMA_REVISION = "v1-ornl-rev4"
 
 
 class IsaacWriter:
@@ -58,7 +59,8 @@ class IsaacWriter:
         Args:
             result: Assembled data from data-assembler
             environment_description: Optional environment/enum value from manifest
-            context_description: Optional free-text context description from manifest
+            context_description: Optional free-text measurement description from
+                manifest ``context``; surfaced as ``measurement.series[].notes``
             raw_file_path: Optional path to raw NeXus file from manifest
             sample_name: Sample name from manifest ``sample.description``
             sample_formula: Sample formula from manifest ``sample.material``
@@ -69,6 +71,17 @@ class IsaacWriter:
         """
         now = datetime.now(timezone.utc)
         refl = result.reflectivity or {}
+
+        # Resolve the environment record, augmenting it with the manifest's
+        # environment text when the assembler did not supply one.
+        env = result.environment or {}
+        if environment_description and not env.get("description"):
+            env["description"] = environment_description
+
+        # Pick the best free-text description of the measurement, preferring the
+        # explicit manifest ``context`` over any free-text environment note.
+        measurement_description = self._select_measurement_description(context_description, env)
+
         record = {
             "isaac_record_version": "1.05",
             "record_id": record_id or str(ULID()).upper(),
@@ -76,11 +89,19 @@ class IsaacWriter:
             "record_domain": "characterization",
             "source_type": "facility",
             "timestamps": self._map_timestamps(refl, now),
-            "measurement": self._map_measurement(refl),
             "descriptors": self._map_descriptors(refl, now),
         }
 
-        # Optional blocks
+        # The free-text description rides on measurement.series[].notes, where it
+        # is directly readable (rev4 closes the top-level, context, and
+        # measurement blocks, so there is no other inline home).
+        measurement_block = self._map_measurement(refl, description=measurement_description)
+        description_placed = False
+        if measurement_block is not None:
+            record["measurement"] = measurement_block
+            description_placed = bool(measurement_description)
+
+        # Optional sample block
         if result.sample:
             sample_block = self._map_sample(
                 result.sample,
@@ -90,20 +111,22 @@ class IsaacWriter:
             if sample_block:
                 record["sample"] = sample_block
         elif sample_name or sample_formula:
-            record["sample"] = {
-                "sample_form": "film",
-                "material": {
-                    "name": sample_name or sample_formula,
-                    "formula": sample_formula or sample_name,
-                },
+            material: dict[str, Any] = {
+                "name": sample_name or sample_formula,
+                "formula": sample_formula or sample_name,
             }
+            if sample_name:
+                material["notes"] = sample_name
+            record["sample"] = {"sample_form": "film", "material": material}
 
-        # Build context from environment record and/or manifest description
-        env = result.environment or {}
-        if environment_description and not env.get("description"):
-            env["description"] = environment_description
-        if env:
-            context_block = self._map_context(env, context_description=context_description)
+        # Context block (rev3/rev4: typed fields only). Applied-potential info
+        # (OCV, "-1 V", …) is parsed from the free-text description into the
+        # typed context.electrochemistry block, defaulting to the SHE scale.
+        electrochemistry = self._parse_electrochemistry(measurement_description)
+        if env or electrochemistry:
+            context_block = self._map_context(
+                env, description=measurement_description, electrochemistry=electrochemistry
+            )
             if context_block:
                 record["context"] = context_block
 
@@ -116,13 +139,22 @@ class IsaacWriter:
         else:
             assets_block = None
 
-        # Stash schema-forbidden context fields (description, ambient_medium)
+        extra_assets: list[dict[str, Any]] = []
+
+        # ``ambient_medium`` has no typed home in the rev3/rev4 context block; keep it
         # in a metadata_snapshot asset so the data is preserved.
-        snapshot_asset = self._build_metadata_snapshot_asset(
-            env, context_description=context_description
-        )
+        snapshot_asset = self._build_metadata_snapshot_asset(env)
         if snapshot_asset:
-            assets_block = (assets_block or []) + [snapshot_asset]
+            extra_assets.append(snapshot_asset)
+
+        # Fallback: with no measurement block (e.g. no reduced series) there is
+        # nowhere inline for the description, so preserve it as a documentation
+        # asset rather than dropping it.
+        if measurement_description and not description_placed:
+            extra_assets.append(self._build_description_asset(measurement_description))
+
+        if extra_assets:
+            assets_block = (assets_block or []) + extra_assets
 
         if assets_block:
             record["assets"] = assets_block
@@ -196,8 +228,16 @@ class IsaacWriter:
 
         return ts
 
-    def _map_measurement(self, refl_data: dict) -> dict[str, Any] | None:
-        """Map Q/R/dR/dQ arrays to measurement series/channels."""
+    def _map_measurement(
+        self, refl_data: dict, description: str | None = None
+    ) -> dict[str, Any] | None:
+        """Map Q/R/dR/dQ arrays to a measurement block.
+
+        When ``description`` is given it is emitted as ``measurement.series[].notes``
+        — a free-text, human/AI-readable summary of how the measurement was made.
+        (Schema rev4 closes the ``measurement`` block but adds a ``notes`` string
+        to each series.)
+        """
         q = refl_data.get("q", [])
         r = refl_data.get("r", [])
 
@@ -225,16 +265,15 @@ class IsaacWriter:
                 {"name": "dQ", "unit": "Å⁻¹", "role": "quality_monitor", "values": list(dq)}
             )
 
-        return {
-            "series": [
-                {
-                    "series_id": "reflectivity_profile",
-                    "independent_variables": [{"name": "q", "unit": "Å⁻¹", "values": list(q)}],
-                    "channels": channels,
-                }
-            ],
-            "qc": {"status": "valid"},
+        series_item: dict[str, Any] = {
+            "series_id": "reflectivity_profile",
+            "independent_variables": [{"name": "q", "unit": "Å⁻¹", "values": list(q)}],
+            "channels": channels,
         }
+        if description:
+            series_item["notes"] = description
+
+        return {"series": [series_item], "qc": {"status": "valid"}}
 
     def _map_descriptors(self, refl_data: dict, now: datetime) -> dict[str, Any]:
         """Extract automated descriptors from measurement data."""
@@ -250,7 +289,7 @@ class IsaacWriter:
                         "source": "auto",
                         "value": min(q),
                         "unit": "Å⁻¹",
-                        "uncertainty": {"type": "none"},
+                        "uncertainty": self._no_uncertainty(),
                     },
                     {
                         "name": "q_range_max",
@@ -258,7 +297,7 @@ class IsaacWriter:
                         "source": "auto",
                         "value": max(q),
                         "unit": "Å⁻¹",
-                        "uncertainty": {"type": "none"},
+                        "uncertainty": self._no_uncertainty(),
                     },
                     {
                         "name": "total_points",
@@ -266,7 +305,7 @@ class IsaacWriter:
                         "source": "auto",
                         "value": len(q),
                         "unit": "count",
-                        "uncertainty": {"type": "none"},
+                        "uncertainty": self._no_uncertainty(),
                     },
                 ]
             )
@@ -279,12 +318,12 @@ class IsaacWriter:
                     "kind": "categorical",
                     "source": "auto",
                     "value": geometry,
-                    "uncertainty": {"type": "none"},
+                    "uncertainty": self._no_uncertainty(),
                 }
             )
 
+        # rev4 dropped descriptors.policy (block is now closed); outputs only.
         return {
-            "policy": {"requires_at_least_one": True},
             "outputs": [
                 {
                     "label": f"automated_extraction_{now.strftime('%Y-%m-%d')}",
@@ -294,6 +333,17 @@ class IsaacWriter:
                 }
             ],
         }
+
+    @staticmethod
+    def _no_uncertainty() -> dict[str, Any]:
+        """Uncertainty object for an auto-extracted value with no reported sigma.
+
+        Schema rev4 models uncertainty as ``{sigma, unit, basis, ...}``. Our
+        measured uncertainties are standard deviations, so we key on ``sigma``;
+        ``None`` denotes no reported value. (rev4 removed the old
+        ``{"type": "none"}`` shape.)
+        """
+        return {"sigma": None}
 
     def _map_sample(
         self,
@@ -324,14 +374,20 @@ class IsaacWriter:
             if provenance:
                 result["material"]["provenance"] = provenance
 
-        # ``sample.geometry`` in schema rev3 is defined with a contradictory
+        # The manifest ``sample.description`` (passed through as ``sample_name``)
+        # is a free-text description of the sample stack. Schema rev4 closes the
+        # ``sample`` block, so surface it on ``sample.material.notes``.
+        if sample_name and "material" in result:
+            result["material"]["notes"] = sample_name
+
+        # ``sample.geometry`` in schema rev3/rev4 is defined with a contradictory
         # ``{"type": "object", "enum": [<string keys>]}`` shape that no concrete
         # object can satisfy.  Until the schema is corrected upstream we omit
         # the geometry block; layer details remain available on the assembler
         # result for downstream tooling.
         return result
 
-    # Valid provenance values per ISAAC v1-ornl-rev3 schema
+    # Valid provenance values per ISAAC v1-ornl-rev4 schema
     _PROVENANCE_ENUM = frozenset(
         {
             "commercial",
@@ -385,7 +441,7 @@ class IsaacWriter:
 
         return result
 
-    # Valid environment enum values per ISAAC v1-ornl-rev3 schema
+    # Valid environment enum values per ISAAC v1-ornl-rev4 schema
     _ENVIRONMENT_ENUM = frozenset(
         {
             "operando",
@@ -421,22 +477,56 @@ class IsaacWriter:
             return "in_silico"
         return "ex_situ"
 
+    def _select_measurement_description(
+        self, context_description: str | None, env: dict
+    ) -> str | None:
+        """Choose the free-text description to attach to the measurement.
+
+        Prefers the explicit manifest ``context`` text, falling back to a
+        free-text environment note (but not a bare environment enum keyword
+        such as ``"in_situ"``, which carries no descriptive content).
+        """
+        if context_description:
+            return context_description
+        env_desc = (env or {}).get("description")
+        if env_desc and env_desc != self._classify_environment(env_desc):
+            return env_desc
+        return None
+
     def _map_context(
-        self, env: dict, context_description: str | None = None
+        self,
+        env: dict,
+        description: str | None = None,
+        electrochemistry: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Map environment record to ISAAC context block.
 
-        Schema rev3 forbids free-form context keys (additionalProperties:
+        Schema rev3/rev4 forbid free-form context keys (additionalProperties:
         false). Only ``environment``, ``temperature_K`` and the typed
-        ``thermodynamics`` block are emitted here. Free-text description
-        and ``ambient_medium`` are preserved separately via
-        :meth:`_build_metadata_snapshot_asset`.
+        ``thermodynamics`` / ``electrochemistry`` blocks are emitted here. The
+        free-text description is surfaced on ``measurement.series[].notes`` and
+        ``ambient_medium`` via :meth:`_build_metadata_snapshot_asset`.
         """
-        if not env:
-            return None
+        env = env or {}
 
-        description = env.get("description", "not specified")
-        environment_enum = self._classify_environment(description)
+        env_desc = env.get("description")
+        if env_desc:
+            environment_enum = self._classify_environment(env_desc)
+            # A bare enum keyword (e.g. from the manifest ``environment:`` field)
+            # is an explicit, authoritative declaration; free text is only a hint.
+            explicit = (
+                env_desc == environment_enum
+                or env_desc.strip().lower() in self._ENVIRONMENT_MAP
+            )
+        else:
+            environment_enum = self._classify_environment(description or "not specified")
+            explicit = False
+
+        # An applied potential implies an operating (operando) measurement — but
+        # only when the environment was inferred; never override an explicit
+        # declaration (e.g. an in-air "OCV" sample is ex_situ, not operando).
+        if electrochemistry and not explicit and environment_enum == "ex_situ":
+            environment_enum = "operando"
 
         result: dict[str, Any] = {
             "environment": environment_enum,
@@ -448,41 +538,78 @@ class IsaacWriter:
         if env.get("pressure"):
             result["thermodynamics"] = {"pressure_Pa": env["pressure"]}
 
+        if electrochemistry:
+            result["electrochemistry"] = electrochemistry
+
         return result
 
-    def _build_metadata_snapshot_asset(
-        self, env: dict, context_description: str | None = None
-    ) -> dict[str, Any] | None:
-        """Build a ``metadata_snapshot`` asset preserving context fields
-        that schema rev3 disallows under ``context``.
+    # --- Electrochemistry parsing -------------------------------------------
 
-        Captures the manifest free-text description (preferring the
-        explicit ``context_description`` argument over the environment
-        record's ``description``) and ``ambient_medium``. Returns ``None``
-        if no preservable data is present.
+    # Numeric applied potential, e.g. "-1 V", "+0.5 V", "0 V", "1.23V"
+    # (ASCII or unicode-minus sign accepted).
+    _POTENTIAL_VALUE_RE = re.compile(r"([+\-−]?\d+(?:\.\d+)?)\s*V\b")
+    # Open-circuit conditions.
+    _OCV_RE = re.compile(r"\bOCV\b|\bOCP\b|open[\s-]?circuit", re.IGNORECASE)
+    # Reference-scale tokens. Acronyms are case-sensitive so the English word
+    # "she" can never be mistaken for the SHE scale; slash-notation electrodes
+    # are matched case-insensitively. Checked in order; first match wins.
+    _POTENTIAL_SCALE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+        (re.compile(r"\bRHE\b"), "RHE"),
+        (re.compile(r"\bSHE\b"), "SHE"),
+        (re.compile(r"\bNHE\b"), "SHE"),  # NHE ≈ SHE
+        (re.compile(r"\bSCE\b"), "SCE"),
+        (re.compile(r"Ag\s*/\s*AgCl", re.IGNORECASE), "Ag/AgCl"),
+        (re.compile(r"Hg\s*/\s*HgSO4", re.IGNORECASE), "Hg/HgSO4"),
+        (re.compile(r"Hg\s*/\s*HgO", re.IGNORECASE), "Hg/HgO"),
+    )
+
+    def _parse_electrochemistry(self, text: str | None) -> dict[str, Any] | None:
+        """Extract applied-potential info from a free-text description.
+
+        Recognises open-circuit (OCV/OCP) and numeric potentials (e.g. ``-1 V``).
+        Numeric potentials default to the SHE scale unless the text names another
+        (RHE, Ag/AgCl, SCE, Hg/HgO, Hg/HgSO4). Returns an ``electrochemistry``
+        block, or ``None`` when no potential is mentioned.
         """
-        env = env or {}
-        env_description = env.get("description")
-        environment_enum = self._classify_environment(env_description or "not specified")
-
-        # Prefer explicit manifest context, then env description (only when
-        # it is not just the bare enum keyword).
-        description = context_description
-        if not description and env_description and env_description != environment_enum:
-            description = env_description
-
-        ambient_medium = env.get("ambient_medium")
-
-        if not description and not ambient_medium:
+        if not text:
             return None
 
-        payload: dict[str, Any] = {}
-        if description:
-            payload["description"] = description
-        if ambient_medium:
-            payload["ambient_medium"] = ambient_medium
+        # OCV/OCP takes precedence: the cell is at open circuit regardless of any
+        # measured value quoted alongside it.
+        if self._OCV_RE.search(text):
+            return {"control_mode": "open_circuit"}
 
-        inline = json.dumps(payload, sort_keys=True)
+        match = self._POTENTIAL_VALUE_RE.search(text)
+        if not match:
+            return None
+
+        value = float(match.group(1).replace("−", "-"))
+        scale = "SHE"  # default convention unless the text names another scale
+        for pattern, name in self._POTENTIAL_SCALE_PATTERNS:
+            if pattern.search(text):
+                scale = name
+                break
+
+        return {
+            "control_mode": "potentiostatic",
+            "potential_setpoint_V": value,
+            "potential_scale": scale,
+        }
+
+    def _build_metadata_snapshot_asset(self, env: dict) -> dict[str, Any] | None:
+        """Build a ``metadata_snapshot`` asset preserving context fields
+        that schema rev3/rev4 disallow under ``context``.
+
+        Currently this captures only ``ambient_medium`` (free-text
+        descriptions now ride on ``measurement.series[].notes``). Returns
+        ``None`` when there is nothing to preserve.
+        """
+        env = env or {}
+        ambient_medium = env.get("ambient_medium")
+        if not ambient_medium:
+            return None
+
+        inline = json.dumps({"ambient_medium": ambient_medium}, sort_keys=True)
         import hashlib
 
         sha = hashlib.sha256(inline.encode("utf-8")).hexdigest()
@@ -492,6 +619,23 @@ class IsaacWriter:
             "content_role": "metadata_snapshot",
             "media_type": "application/json",
             "uri": "data:application/json;base64," + _b64(inline),
+            "sha256": sha,
+        }
+
+    def _build_description_asset(self, text: str) -> dict[str, Any]:
+        """Build a ``documentation`` asset carrying a free-text description.
+
+        Used only as a fallback when there is no measurement block to host
+        the description on ``measurement.series[].notes``, so it is not lost.
+        """
+        import hashlib
+
+        sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        return {
+            "asset_id": "measurement_description",
+            "content_role": "documentation",
+            "media_type": "text/markdown",
+            "uri": "data:text/markdown;base64," + _b64(text),
             "sha256": sha,
         }
 

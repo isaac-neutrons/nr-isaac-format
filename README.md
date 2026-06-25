@@ -165,7 +165,7 @@ nr-isaac-format fetch-schema [OPTIONS]
 | Field | Required | Description |
 |-------|----------|-------------|
 | `title` | No | Experiment title |
-| `sample.description` | No | Sample description text |
+| `sample.description` | No | Free-text sample description (→ `sample.material.notes`) |
 | `sample.model` | No | Default model JSON file for all measurements |
 | `sample.model_dataset_index` | No | Default 1-based dataset index in co-refinement models |
 | `output` | Yes | Output directory for ISAAC JSON files |
@@ -181,7 +181,7 @@ nr-isaac-format fetch-schema [OPTIONS]
 | `model` | No | Model JSON file (overrides `sample.model`) |
 | `model_dataset_index` | No | Dataset index (overrides `sample.model_dataset_index`) |
 | `environment` | No | Environment enum value (`operando`, `in_situ`, `ex_situ`, `in_silico`) or free text that will be classified |
-| `context` | No | Free-text description of measurement context (→ `context.description`) |
+| `context` | No | Free-text description of how the measurement was made (→ `measurement.series[].notes`). Applied potentials mentioned here (`OCV`, `-1 V`, `0.5 V vs RHE`, …) are also parsed into `context.electrochemistry`, defaulting to the SHE scale. |
 | `raw` | No | Path to raw NeXus file (→ `assets[]` with `content_role: "raw_data_pointer"`) |
 
 The first measurement's model is used to create the sample record. All subsequent measurements reuse the same sample ID.
@@ -234,20 +234,20 @@ path = write_isaac_record(result, "output.json")
 
 ## Output Format
 
-Each ISAAC record is a JSON file conforming to the ISAAC AI-Ready Scientific Record v1.0 schema. Key blocks:
+Each ISAAC record is a JSON file conforming to the ISAAC AI-Ready Scientific Record schema (`v1-ornl-rev4`). Key blocks:
 
 | Block | Description |
 |-------|-------------|
-| `isaac_record_version` | Always `"1.0"` |
+| `isaac_record_version` | Always `"1.05"` |
 | `record_id` | Auto-generated ULID |
 | `record_type` | `"evidence"` |
 | `record_domain` | `"characterization"` |
 | `timestamps` | `created_utc` and `acquired_start_utc` from run metadata |
-| `acquisition_source` | Facility, beamline, endstation info |
-| `measurement` | Q/R/dR/dQ reflectivity series and QC status |
+| `source_type` | Origin of the data (`"facility"`) |
+| `measurement` | Q/R/dR/dQ reflectivity series, QC status, and a free-text `series[].notes` describing how the measurement was made |
 | `descriptors` | Computed descriptors: q-range, total points, geometry, etc. |
-| `sample` | Composition, layer geometry, sample form (`film`), provenance |
-| `context` | Environment enum, temperature, description, ambient medium |
+| `sample` | Composition, sample form (`film`), provenance, and free-text `material.notes` |
+| `context` | Environment enum, temperature, thermodynamics, and `electrochemistry` (control mode + applied potential parsed from the description; defaults to the SHE scale) |
 | `system` | Instrument, facility, configuration |
 | `assets` | Raw NeXus file pointer, reduced data file with SHA-256 |
 

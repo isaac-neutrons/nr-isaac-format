@@ -1034,7 +1034,8 @@
               0.0007951525700513
             ]
           }
-        ]
+        ],
+        "notes": "Electrochemical cell, THF electrolyte, steady-state OCV"
       }
     ],
     "qc": {
@@ -1042,9 +1043,6 @@
     }
   },
   "descriptors": {
-    "policy": {
-      "requires_at_least_one": true
-    },
     "outputs": [
       {
         "label": "automated_extraction_2026-05-04",
@@ -1061,7 +1059,7 @@
             "value": 0.010434351529001,
             "unit": "\u00c5\u207b\u00b9",
             "uncertainty": {
-              "type": "none"
+              "sigma": null
             }
           },
           {
@@ -1071,7 +1069,7 @@
             "value": 0.0357670167172291,
             "unit": "\u00c5\u207b\u00b9",
             "uncertainty": {
-              "type": "none"
+              "sigma": null
             }
           },
           {
@@ -1081,7 +1079,7 @@
             "value": 248,
             "unit": "count",
             "uncertainty": {
-              "type": "none"
+              "sigma": null
             }
           },
           {
@@ -1090,7 +1088,7 @@
             "source": "auto",
             "value": "back reflection",
             "uncertainty": {
-              "type": "none"
+              "sigma": null
             }
           }
         ]
@@ -1106,7 +1104,10 @@
   },
   "context": {
     "environment": "operando",
-    "temperature_K": 295.0
+    "temperature_K": 295.0,
+    "electrochemistry": {
+      "control_mode": "open_circuit"
+    }
   },
   "system": {
     "domain": "experimental",
@@ -1137,8 +1138,8 @@
       "asset_id": "context_metadata_snapshot",
       "content_role": "metadata_snapshot",
       "media_type": "application/json",
-      "uri": "data:application/json;base64,eyJhbWJpZW50X21lZGl1bSI6IHsiZGVuc2l0eSI6IG51bGwsICJtYXNzIjogbnVsbCwgIm5hbWUiOiAiVEhGIn0sICJkZXNjcmlwdGlvbiI6ICJFbGVjdHJvY2hlbWljYWwgY2VsbCwgVEhGIGVsZWN0cm9seXRlLCBzdGVhZHktc3RhdGUgT0NWIn0=",
-      "sha256": "8ece39e2264dc3bb962d395941336da496a9534342640f9d8b830a809b740988"
+      "uri": "data:application/json;base64,eyJhbWJpZW50X21lZGl1bSI6IHsiZGVuc2l0eSI6IG51bGwsICJtYXNzIjogbnVsbCwgIm5hbWUiOiAiVEhGIn19",
+      "sha256": "f3ab9dcf348aa1fa2efb2597041a3f6543076d922b76f79b694bdb101517933b"
     }
   ]
 }

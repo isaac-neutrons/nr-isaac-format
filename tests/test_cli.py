@@ -675,6 +675,84 @@ class TestMigrateCommand:
         ]
         assert len(snapshot_assets) == 1
 
+    def test_migrate_rev3_to_rev4(self, runner, tmp_path):
+        """Should migrate a rev3-writer record forward to rev4: drop
+        descriptors.policy, rewrite uncertainty to the sigma shape, and relocate
+        measurement/sample descriptions to series/material notes."""
+        record = {
+            "isaac_record_version": "1.05",
+            "record_id": "01HXYZ1234567890ABCDEFGH",
+            "record_type": "evidence",
+            "record_domain": "characterization",
+            "source_type": "facility",
+            "timestamps": {"created_utc": "2026-03-03T15:23:25Z"},
+            "measurement": {
+                "description": "Back-reflection NR through Si substrate.",
+                "series": [
+                    {
+                        "series_id": "reflectivity_profile",
+                        "independent_variables": [{"name": "q", "unit": "A-1", "values": [0.01]}],
+                        "channels": [
+                            {
+                                "name": "R",
+                                "unit": "dimensionless",
+                                "role": "primary_signal",
+                                "values": [0.9],
+                            }
+                        ],
+                    }
+                ],
+                "qc": {"status": "valid"},
+            },
+            "sample": {
+                "sample_form": "film",
+                "description": "air / CuOx / 50 nm Cu / 3 nm Ti on Si",
+                "material": {"name": "Cu", "formula": "Cu"},
+            },
+            "descriptors": {
+                "policy": {"requires_at_least_one": True},
+                "outputs": [
+                    {
+                        "label": "automated_extraction",
+                        "generated_utc": "2026-03-03T15:23:25Z",
+                        "generated_by": {"agent": "nr-isaac-format", "version": "0.1.0"},
+                        "descriptors": [
+                            {
+                                "name": "q_range_min",
+                                "kind": "absolute",
+                                "source": "auto",
+                                "value": 0.01,
+                                "unit": "A-1",
+                                "uncertainty": {"type": "none"},
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
+        path = tmp_path / "isaac_record_230536.json"
+        path.write_text(json.dumps(record, indent=2))
+
+        result = runner.invoke(main, ["migrate", str(path)])
+        assert result.exit_code == 0, result.output
+        assert "Migrated 1 record" in result.output
+
+        migrated = json.loads((tmp_path / "isaac_record_230536_v2.json").read_text())
+
+        # descriptors.policy dropped; uncertainty rewritten to the sigma shape
+        assert "policy" not in migrated["descriptors"]
+        unc = migrated["descriptors"]["outputs"][0]["descriptors"][0]["uncertainty"]
+        assert unc == {"sigma": None}
+
+        # descriptions relocated to rev4 homes
+        assert "description" not in migrated["measurement"]
+        assert (
+            migrated["measurement"]["series"][0]["notes"]
+            == "Back-reflection NR through Si substrate."
+        )
+        assert "description" not in migrated["sample"]
+        assert migrated["sample"]["material"]["notes"] == "air / CuOx / 50 nm Cu / 3 nm Ti on Si"
+
     def test_migrate_does_not_overwrite(self, runner, tmp_path):
         """Should never overwrite the original file."""
         record_path = self._make_rev1_record(tmp_path)
@@ -862,3 +940,20 @@ class TestConvertIngestCommand:
         record = json.loads((ingest_dir / "isaac_record_218386.json").read_text())
         assert record["sample"]["material"]["name"] == "Cu film"
         assert any(a.get("asset_id") == "raw_nexus_file" for a in record.get("assets", []))
+
+
+class TestHelpListing:
+    """The command listing in --help should show full summaries, not '...'."""
+
+    def test_command_summaries_not_truncated(self, runner):
+        result = runner.invoke(main, ["--help"])
+        assert result.exit_code == 0
+
+        # The previously-truncated form ("... manifest to...") must not appear.
+        assert "manifest to..." not in result.output
+
+        # Full summaries appear verbatim (collapse wrapping whitespace first,
+        # since narrow widths wrap continuation lines onto the next row).
+        normalized = " ".join(result.output.split())
+        assert "Convert measurements described in a YAML manifest to ISAAC format." in normalized
+        assert "Regenerate ISAAC records from a manifest using the latest writer and schema." in normalized

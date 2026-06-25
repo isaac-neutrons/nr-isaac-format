@@ -9,6 +9,7 @@ one ISAAC AI-Ready Record per measurement.
 Also provides commands for pushing records to the ISAAC Portal API.
 """
 
+import inspect
 import json
 import os
 import sys
@@ -23,7 +24,36 @@ from . import __version__
 from .writer import IsaacWriter
 
 
-@click.group()
+class _FullHelpCommand(click.Command):
+    """A command that keeps its full one-line summary in the parent group's
+    command listing, instead of truncating it with an ellipsis.
+
+    Click derives the listing's short help from the docstring and clips it to
+    a width-derived limit. We override that to return the complete first
+    paragraph; the help formatter wraps long lines rather than dropping text.
+    """
+
+    def get_short_help_str(self, limit: int = 45) -> str:
+        if self.short_help:
+            return inspect.cleandoc(self.short_help).strip()
+        if self.help:
+            first_paragraph = inspect.cleandoc(self.help).split("\n\n", 1)[0]
+            return " ".join(first_paragraph.split())
+        return ""
+
+
+class _FullHelpGroup(click.Group):
+    """A group whose subcommands keep their full short help (no ellipsis)."""
+
+    command_class = _FullHelpCommand
+
+
+# Let help text use the full terminal width (up to 120 cols) instead of
+# Click's default 80-column cap, which forces aggressive wrapping/truncation.
+_CONTEXT_SETTINGS = {"max_content_width": 120}
+
+
+@click.group(cls=_FullHelpGroup, context_settings=_CONTEXT_SETTINGS)
 @click.version_option(version=__version__)
 def main() -> None:
     """
@@ -997,6 +1027,52 @@ def _migrate_record_to_rev3(record: dict) -> bool:
     return changed
 
 
+def _migrate_record_to_rev4(record: dict) -> bool:
+    """Migrate an ISAAC record from rev3 schema to rev4 in-place.
+
+    rev4 closes most blocks with ``additionalProperties: false``. Applies:
+    - Removes ``descriptors.policy`` (the block is now closed; ``outputs`` only).
+    - Rewrites each descriptor's ``uncertainty`` from the old ``{"type": ...}``
+      shape to rev4's ``{"sigma": null}``.
+    - Relocates ``measurement.description`` → ``measurement.series[].notes``.
+    - Relocates ``sample.description`` → ``sample.material.notes``.
+
+    ``isaac_record_version`` const is unchanged ("1.05"). Returns True if any
+    changes were made, False if already rev4-compatible.
+    """
+    changed = False
+
+    descriptors = record.get("descriptors")
+    if isinstance(descriptors, dict):
+        if "policy" in descriptors:
+            del descriptors["policy"]
+            changed = True
+        for output in descriptors.get("outputs", []):
+            for desc in output.get("descriptors", []):
+                unc = desc.get("uncertainty")
+                if isinstance(unc, dict) and "type" in unc and "sigma" not in unc:
+                    desc["uncertainty"] = {"sigma": None}
+                    changed = True
+
+    measurement = record.get("measurement")
+    if isinstance(measurement, dict) and "description" in measurement:
+        note = measurement.pop("description")
+        series = measurement.get("series")
+        if isinstance(series, list) and series and isinstance(series[0], dict):
+            series[0].setdefault("notes", note)
+        changed = True
+
+    sample = record.get("sample")
+    if isinstance(sample, dict) and "description" in sample:
+        note = sample.pop("description")
+        material = sample.get("material")
+        if isinstance(material, dict):
+            material.setdefault("notes", note)
+        changed = True
+
+    return changed
+
+
 # ---------------------------------------------------------------------------
 # update command
 # ---------------------------------------------------------------------------
@@ -1270,15 +1346,17 @@ def update(manifest: Path, compact: bool, dry_run: bool) -> None:
 @main.command()
 @click.argument("paths", nargs=-1, required=True)
 def migrate(paths: tuple[str, ...]) -> None:
-    """Migrate ISAAC records to the latest schema revision (v1-ornl-rev3).
+    """Migrate ISAAC records to the latest schema revision (v1-ornl-rev4).
 
     Lightweight schema-only migration: applies structural changes from
     rev1 → rev2 (acquisition_source removal, descriptor source remap,
-    system.technique addition) and rev2 → rev3 (version bump,
-    pressure_Pa relocation under thermodynamics, removal of forbidden
-    context fields into a metadata_snapshot asset) without re-running
-    the data pipeline. Use this when the original data files are not
-    available; prefer ``update`` for a full regeneration.
+    system.technique addition), rev2 → rev3 (version bump, pressure_Pa
+    relocation under thermodynamics, removal of forbidden context fields
+    into a metadata_snapshot asset), and rev3 → rev4 (drop descriptors.policy,
+    rewrite uncertainty to the sigma shape, relocate descriptions to
+    series/material notes) without re-running the data pipeline. Use this when
+    the original data files are not available; prefer ``update`` for a full
+    regeneration.
 
     Writes a new versioned copy — the original file is never overwritten.
 
@@ -1293,7 +1371,7 @@ def migrate(paths: tuple[str, ...]) -> None:
         sys.exit(1)
 
     click.echo(
-        click.style(f"Migrating {len(files)} record(s) to rev3 schema", fg="cyan", bold=True)
+        click.style(f"Migrating {len(files)} record(s) to rev4 schema", fg="cyan", bold=True)
     )
     click.echo()
 
@@ -1311,9 +1389,10 @@ def migrate(paths: tuple[str, ...]) -> None:
 
         changed = _migrate_record_to_rev2(record)
         changed = _migrate_record_to_rev3(record) or changed
+        changed = _migrate_record_to_rev4(record) or changed
 
         if not changed:
-            click.echo(click.style(f"  – {label}: already rev3-compatible", fg="yellow"))
+            click.echo(click.style(f"  – {label}: already rev4-compatible", fg="yellow"))
             skipped += 1
             continue
 
@@ -1329,7 +1408,7 @@ def migrate(paths: tuple[str, ...]) -> None:
     if migrated:
         click.echo(click.style(f"Migrated {migrated} record(s).", fg="green"))
     if skipped:
-        click.echo(click.style(f"Skipped {skipped} record(s) (already rev3).", fg="yellow"))
+        click.echo(click.style(f"Skipped {skipped} record(s) (already rev4).", fg="yellow"))
 
 
 if __name__ == "__main__":

@@ -194,10 +194,10 @@ class TestIsaacWriter:
         assert payload["ambient_medium"] == "D2O"
 
     def test_context_classifies_electrochemical(self):
-        """Should classify electrochemical descriptions as operando and stash
-        the free-text description in a metadata_snapshot asset."""
+        """Should classify electrochemical descriptions as operando and surface
+        the free-text description on measurement.description."""
         result = create_mock_result(
-            reflectivity={"facility": "SNS"},
+            reflectivity={"facility": "SNS", "q": [0.01, 0.02], "r": [0.9, 0.8]},
             environment={
                 "description": "Electrochemical cell, THF electrolyte, steady-state OCV",
             },
@@ -207,13 +207,15 @@ class TestIsaacWriter:
         ctx = record["context"]
         assert ctx["environment"] == "operando"
         assert "description" not in ctx
-        snapshot = _find_metadata_snapshot(record)
-        assert snapshot is not None
-        payload = _decode_snapshot(snapshot)
         assert (
-            payload["description"]
+            record["measurement"]["series"][0]["notes"]
             == "Electrochemical cell, THF electrolyte, steady-state OCV"
         )
+        # "OCV" → open-circuit control mode
+        assert ctx["electrochemistry"] == {"control_mode": "open_circuit"}
+        # No ambient_medium → no metadata_snapshot needed
+        assert _find_metadata_snapshot(record) is None
+
     def test_context_defaults_required_fields(self):
         """Should default temperature_K and environment when not provided."""
         result = create_mock_result(
@@ -247,7 +249,7 @@ class TestIsaacWriter:
 
     def test_with_environment_description_no_env_record(self):
         """Should create context block from manifest environment_description."""
-        result = create_mock_result(reflectivity={"facility": "SNS"})
+        result = create_mock_result(reflectivity={"facility": "SNS", "q": [0.01], "r": [0.9]})
         writer = IsaacWriter()
         record = writer.to_isaac(
             result, environment_description="Electrochemical cell, THF electrolyte"
@@ -258,10 +260,9 @@ class TestIsaacWriter:
         assert record["context"]["environment"] == "operando"
         assert "description" not in record["context"]
         assert "temperature_K" in record["context"]  # required by schema
-        snapshot = _find_metadata_snapshot(record)
-        assert snapshot is not None
-        payload = _decode_snapshot(snapshot)
-        assert payload["description"] == "Electrochemical cell, THF electrolyte"
+        assert (
+            record["measurement"]["series"][0]["notes"] == "Electrochemical cell, THF electrolyte"
+        )
 
     def test_environment_description_does_not_override_existing(self):
         """Should not override existing environment description."""
@@ -276,8 +277,8 @@ class TestIsaacWriter:
         assert record["context"]["environment"] == "in_situ"
 
     def test_context_description_from_manifest(self):
-        """Should preserve context_description in a metadata_snapshot asset."""
-        result = create_mock_result(reflectivity={"facility": "SNS"})
+        """Should surface context_description on measurement.description."""
+        result = create_mock_result(reflectivity={"facility": "SNS", "q": [0.01], "r": [0.9]})
         writer = IsaacWriter()
         record = writer.to_isaac(
             result,
@@ -288,18 +289,16 @@ class TestIsaacWriter:
         ctx = record["context"]
         assert ctx["environment"] == "operando"
         assert "description" not in ctx
-        snapshot = _find_metadata_snapshot(record)
-        assert snapshot is not None
-        payload = _decode_snapshot(snapshot)
         assert (
-            payload["description"]
+            record["measurement"]["series"][0]["notes"]
             == "Electrochemical cell, THF electrolyte, steady-state OCV"
         )
+        assert ctx["electrochemistry"] == {"control_mode": "open_circuit"}
 
     def test_context_description_overrides_env_text(self):
         """Explicit context_description should take precedence over env description."""
         result = create_mock_result(
-            reflectivity={"facility": "SNS"},
+            reflectivity={"facility": "SNS", "q": [0.01], "r": [0.9]},
             environment={"description": "Electrochemical cell"},
         )
         writer = IsaacWriter()
@@ -308,10 +307,88 @@ class TestIsaacWriter:
             context_description="Custom context note",
         )
 
-        snapshot = _find_metadata_snapshot(record)
-        assert snapshot is not None
-        payload = _decode_snapshot(snapshot)
-        assert payload["description"] == "Custom context note"
+        assert record["measurement"]["series"][0]["notes"] == "Custom context note"
+        # Plain text with no potential → no electrochemistry block
+        assert "electrochemistry" not in record["context"]
+
+    def test_potential_setpoint_parsed(self):
+        """A numeric applied potential → potentiostatic setpoint, default SHE."""
+        result = create_mock_result(
+            reflectivity={"facility": "SNS", "q": [0.01], "r": [0.9]},
+        )
+        writer = IsaacWriter()
+        record = writer.to_isaac(
+            result, context_description="Operando NR held at -1 V; back reflection."
+        )
+        ec = record["context"]["electrochemistry"]
+        assert ec == {
+            "control_mode": "potentiostatic",
+            "potential_setpoint_V": -1.0,
+            "potential_scale": "SHE",
+        }
+        # Applied potential implies operando even without the keyword
+        assert record["context"]["environment"] == "operando"
+
+    def test_potential_scale_detected(self):
+        """An explicit reference scale overrides the SHE default."""
+        result = create_mock_result(
+            reflectivity={"facility": "SNS", "q": [0.01], "r": [0.9]},
+        )
+        writer = IsaacWriter()
+        record = writer.to_isaac(result, context_description="Measured at +0.5 V vs RHE.")
+        ec = record["context"]["electrochemistry"]
+        assert ec["potential_setpoint_V"] == 0.5
+        assert ec["potential_scale"] == "RHE"
+        assert ec["control_mode"] == "potentiostatic"
+
+    def test_ocv_takes_precedence_over_value(self):
+        """OCV → open_circuit even when a measured value is quoted alongside."""
+        result = create_mock_result(
+            reflectivity={"facility": "SNS", "q": [0.01], "r": [0.9]},
+        )
+        writer = IsaacWriter()
+        record = writer.to_isaac(result, context_description="At OCV (about 0.2 V vs RHE).")
+        assert record["context"]["electrochemistry"] == {"control_mode": "open_circuit"}
+
+    def test_explicit_environment_not_overridden_by_potential(self):
+        """An explicit manifest environment (ex_situ) must survive even when the
+        context mentions OCV (e.g. an in-air open-circuit measurement)."""
+        result = create_mock_result(reflectivity={"facility": "SNS", "q": [0.01], "r": [0.9]})
+        writer = IsaacWriter()
+        record = writer.to_isaac(
+            result,
+            environment_description="ex_situ",
+            context_description="Deposited Cu on Ti on Si, in air (OCV).",
+        )
+        assert record["context"]["environment"] == "ex_situ"
+        assert record["context"]["electrochemistry"] == {"control_mode": "open_circuit"}
+
+    def test_no_potential_no_electrochemistry(self):
+        """A description with no potential must not emit an electrochemistry block."""
+        result = create_mock_result(
+            reflectivity={"facility": "SNS", "q": [0.01], "r": [0.9]},
+            environment={"temperature": 298.0},
+        )
+        writer = IsaacWriter()
+        record = writer.to_isaac(
+            result, context_description="Si / 3 nm Ti / 50 nm Cu; DREAM joint fit, chi2=1.6."
+        )
+        assert "electrochemistry" not in record["context"]
+
+    def test_description_fallback_documentation_asset(self):
+        """With no measurement series, the description is preserved as a
+        documentation asset rather than dropped."""
+        result = create_mock_result(reflectivity={"facility": "SNS"})  # no q/r
+        writer = IsaacWriter()
+        record = writer.to_isaac(result, context_description="Back-reflection through Si substrate")
+
+        assert "measurement" not in record
+        docs = [a for a in record.get("assets", []) if a["content_role"] == "documentation"]
+        assert len(docs) == 1
+        prefix = "data:text/markdown;base64,"
+        assert docs[0]["uri"].startswith(prefix)
+        text = base64.b64decode(docs[0]["uri"][len(prefix):]).decode("utf-8")
+        assert text == "Back-reflection through Si substrate"
 
     def test_raw_file_path_from_manifest(self):
         """Should include manifest raw_file_path in assets."""
@@ -438,8 +515,18 @@ class TestSampleFromManifest:
             result, sample_name="Cu in THF on Si", sample_formula="THF | CuOx | Cu | Ti | Si"
         )
 
-        # Assembler composition wins
+        # Assembler composition wins for material.name ...
         assert record["sample"]["material"]["name"] == "Fe/Si"
+        # ... but the manifest sample.description is still surfaced readably.
+        assert record["sample"]["material"]["notes"] == "Cu in THF on Si"
+
+    def test_sample_description_when_no_assembler_sample(self):
+        """sample_name populates sample.material.notes in the synthesized block."""
+        result = create_mock_result(reflectivity={"facility": "SNS"})
+        writer = IsaacWriter()
+        record = writer.to_isaac(result, sample_name="air / CuOx / 50 nm Cu / 3 nm Ti on Si")
+
+        assert record["sample"]["material"]["notes"] == "air / CuOx / 50 nm Cu / 3 nm Ti on Si"
 
     def test_no_manifest_fields_no_sample(self):
         """Should not create sample block when no manifest sample fields and no assembler sample."""
@@ -466,3 +553,52 @@ class TestSampleFromManifest:
 
         assert record["sample"]["material"]["name"] == "THF | CuOx | Cu | Ti | Si"
         assert record["sample"]["material"]["formula"] == "THF | CuOx | Cu | Ti | Si"
+
+
+class TestSchemaValidation:
+    """Guard: writer output must validate against the latest bundled schema."""
+
+    def test_output_validates_against_latest_bundled_schema(self):
+        from pathlib import Path
+
+        import jsonschema
+
+        from nr_isaac_format.cli import _find_latest_schema
+
+        schema_dir = Path(__file__).resolve().parents[1] / "src/nr_isaac_format/schema"
+        schema = json.loads(_find_latest_schema(schema_dir).read_text())
+
+        result = create_mock_result(
+            reflectivity={
+                "facility": "SNS",
+                "instrument_name": "REF_L",
+                "q": [0.01, 0.02, 0.03],
+                "r": [0.9, 0.8, 0.7],
+                "dr": [0.01, 0.01, 0.02],
+                "dq": [0.001, 0.002, 0.003],
+                "measurement_geometry": "back reflection",
+            },
+            sample={"main_composition": "Cu", "provenance": "commercial", "layers": []},
+            environment={"temperature": 298.0, "ambient_medium": "D2O"},
+        )
+        writer = IsaacWriter()
+        record = writer.to_isaac(
+            result,
+            context_description="Operando NR through Si at -1 V vs RHE; DREAM joint fit.",
+            sample_name="air / CuOx / 50 nm Cu / 3 nm Ti on Si",
+        )
+
+        jsonschema.validate(record, schema)  # raises on any rev4 violation
+
+        # Spot-check the rev4 homes for the free-text descriptions and fixes.
+        assert record["measurement"]["series"][0]["notes"].startswith("Operando")
+        assert record["sample"]["material"]["notes"].startswith("air /")
+        first_unc = record["descriptors"]["outputs"][0]["descriptors"][0]["uncertainty"]
+        assert first_unc == {"sigma": None}
+        assert "policy" not in record["descriptors"]
+        # Parsed applied potential lands in the typed electrochemistry block.
+        assert record["context"]["electrochemistry"] == {
+            "control_mode": "potentiostatic",
+            "potential_setpoint_V": -1.0,
+            "potential_scale": "RHE",
+        }
