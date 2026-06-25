@@ -26,6 +26,12 @@ dependencies = [
     # Pinned to a known-good data-assembler commit (was tracking the default
     # branch). Bump deliberately; keep in lockstep with the AssemblyResult /
     # assembler.parsers API that convert-ingest imports.
+    #
+    # NOTE: the canonical pipeline now needs the data-assembler that provides
+    # `ingest-workflow` plus the structured fields it emits — reflectivity_model.
+    # chi_squared and environment.{potential,potential_scale,control_mode,
+    # electrolyte,pH}. Bump the pin to the merged commit once the data-assembler
+    # `feature/pull-workflow-ingest` branch lands.
     "data-assembler @ git+https://github.com/isaac-neutrons/data-assembler.git",
     "jsonschema>=4.0",
     "python-ulid>=2.0",

@@ -3,13 +3,16 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
 
-Manifest-driven CLI for converting neutron reflectometry data from [data-assembler](https://github.com/isaac-neutrons/data-assembler) into [ISAAC AI-Ready Record](https://github.com/dimosthenisSLAC/isaac-ai-ready-record) v1.0 format, with commands for schema validation and pushing records to the ISAAC Portal API.
+CLI for converting neutron reflectometry data from [data-assembler](https://github.com/isaac-neutrons/data-assembler) into [ISAAC AI-Ready Record](https://github.com/dimosthenisSLAC/isaac-ai-ready-record) format, with commands for schema validation and pushing records to the ISAAC Portal API.
 
 ## Overview
 
-You describe your sample and measurements in a single YAML manifest file.
-The tool handles parsing, assembly via data-assembler, and ISAAC record generation — one JSON record per measurement.
-Records can then be validated locally against the schema and pushed to the ISAAC Portal.
+This tool owns the **ISAAC-schema mapping**: it turns the data-assembler's neutral typed records (reflectivity, sample, environment, fitted model with σ/χ²/conditions) into validated ISAAC AI-Ready Records, and pushes them to the Portal.
+
+Two entry points:
+
+- **`convert-ingest` (canonical).** Consumes a data-assembler ingest directory. In the standard pipeline the assembler pulls everything from a fit run directory (`data-assembler ingest-workflow <run>`), so fitted layers + uncertainties, χ², and experimental conditions all reach the record automatically. This is the route the AuRE workflow uses.
+- **`convert` (manual/standalone).** Builds a record directly from a YAML **manifest** (fitted result) or **plan** (pre-fit), re-running the assembler from raw files. Handy for ad-hoc conversions; the manifest is no longer the pipeline handoff.
 
 ## Installation
 
@@ -20,6 +23,22 @@ pip install -e .
 This installs the `nr-isaac-format` CLI and pulls in all dependencies, including [data-assembler](https://github.com/isaac-neutrons/data-assembler).
 
 ## Quick Start
+
+### Canonical: from a fit run directory
+
+The data-assembler pulls everything (data, fitted model with σ, χ², conditions) from a standard fit run directory; this tool maps the resulting records to ISAAC:
+
+```bash
+data-assembler ingest-workflow ./workflow/230539 -o ./ingest --json
+nr-isaac-format convert-ingest ./ingest -o ./ingest/isaac_record.json
+nr-isaac-format validate ./ingest/isaac_record_230539.json
+```
+
+This is the route the AuRE workflow drives automatically — no manifest involved.
+
+### Manual: from a manifest or plan
+
+For ad-hoc conversions you can build a record directly from a YAML manifest (fitted) or plan (pre-fit). This re-runs the assembler from raw files.
 
 ### 1. Create a manifest
 
@@ -99,9 +118,24 @@ nr-isaac-format push output/ --validate-only
 
 ## CLI Reference
 
-### `nr-isaac-format convert`
+### `nr-isaac-format convert-ingest` (canonical)
 
-Convert a YAML **manifest** (fitted result) or a YAML **plan** (pre-fit) to ISAAC records. The format is detected automatically.
+Map a data-assembler ingest directory (the `reflectivity`/`sample`/`environment`/`reflectivity_model` records, as Parquet or JSON) to a single ISAAC record. This is the canonical route — fitted layers + σ, χ², and structured conditions flow straight through from the assembler.
+
+```bash
+nr-isaac-format convert-ingest [OPTIONS] INGEST_DIR
+```
+
+| Option | Description |
+|--------|-------------|
+| `-o, --output PATH` | Output file or directory (defaults to the ingest dir) |
+| `--context TEXT` | Free-text measurement notes (→ `measurement.series[].notes`) |
+| `--result-out FILE` | Write a neutral `ndip-tool-result/1` manifest describing the conversion |
+| `--compact` / `--dry-run` | Compact JSON / assemble without writing |
+
+### `nr-isaac-format convert` (manual)
+
+Build a record directly from a YAML **manifest** (fitted result) or **plan** (pre-fit), re-running the assembler from raw files. The format is detected automatically. This is the manual/standalone route — the manifest is no longer the pipeline handoff (see `convert-ingest`).
 
 ```bash
 nr-isaac-format convert [OPTIONS] INPUT_FILE

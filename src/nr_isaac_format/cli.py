@@ -205,6 +205,11 @@ def convert(
 ) -> None:
     """Convert a manifest.yaml or a plan.yaml to ISAAC AI-Ready Records.
 
+    Manual/standalone route: builds a record directly from raw files. The
+    canonical pipeline route is ``convert-ingest`` (fed by the data-assembler),
+    which carries fit uncertainties, χ², and structured conditions; the manifest
+    is no longer the pipeline handoff.
+
     INPUT_FILE is either a fitted-result *manifest* (sample + measurements with
     models) or a pre-fit *plan* (describe + states). The format is detected
     automatically. Each measurement/state produces one ISAAC record.
@@ -548,9 +553,14 @@ def convert_ingest(
 ) -> None:
     """Convert a data-assembler ingest output directory to an ISAAC record.
 
-    INGEST_DIR is the directory passed to ``data-assembler ingest --output``.
-    The JSON files (when written with ``--json``) are preferred; otherwise
-    the Parquet files are read.
+    This is the canonical route: the data-assembler is the structured-truth
+    layer (typically populated by ``data-assembler ingest-workflow <run>``,
+    which pulls the fitted model with uncertainties, χ², and experimental
+    conditions), and this command maps its records to ISAAC.
+
+    INGEST_DIR is the directory written by ``data-assembler ingest`` /
+    ``ingest-workflow``. The JSON files (when written with ``--json``) are
+    preferred; otherwise the Parquet files are read.
     One ISAAC AI-Ready Record is written.
     """
     from .result_manifest import write_manifest
