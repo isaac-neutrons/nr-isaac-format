@@ -440,6 +440,289 @@ def convert(
 
 
 # ---------------------------------------------------------------------------
+# plan-to-manifest command
+# ---------------------------------------------------------------------------
+
+
+def _build_manifest_from_plan(
+    plan: dict,
+    plan_path: Path,
+    data_dir: Path | None,
+    records_dir: str,
+) -> tuple[str, dict, list[str]]:
+    """Build a ``manifest.yaml`` document from a pre-fit ``plan.yaml``.
+
+    Each plan ``state`` becomes one manifest ``measurement`` under a single
+    shared sample, so the measurements stay grouped as one sample's history.
+    When the manifest is converted, the assembler builds the sample once from
+    the first measurement and reuses that sample identity for the rest, rather
+    than treating each state as an unrelated one-off as separate conversions
+    would. (The reused identity is internal to assembly; the records carry the
+    same sample description, not a record-level id.)
+
+    The plan is pre-fit, so no layer model is attached; a header comment shows
+    where to add one after fitting. Field mapping (mirroring ``_convert_plan``):
+
+    - ``describe`` → ``sample.description``
+    - ``state.name`` → ``measurement.name``
+    - ``state.data[0]`` → ``measurement.reduced`` (primary partial, resolved
+      against *data_dir*; siblings are noted, not merged)
+    - ``state.extra_description`` → ``measurement.environment`` (classified) and
+      ``measurement.context`` (free-text notes), matching how the plan path
+      feeds the same text to both the assembler and the writer
+    - ``state.back_reflection`` → folded into ``measurement.context`` as a
+      geometry note (the manifest ``convert`` path has no structured slot, so
+      this drops the structured ``measurement_geometry`` descriptor that
+      ``convert <plan>`` would emit)
+    - ``model_name`` / ``metadata.notes`` / any other plan-only state field
+      (``theta_offset``, ``sample_broadening``, ``background``, …) → YAML comments
+
+    Returns ``(yaml_text, manifest_dict, warnings)``.
+    """
+    import textwrap
+
+    import yaml
+
+    def _flat(value: object) -> str:
+        """Collapse all whitespace (incl. newlines) so *value* is safe to drop
+        into a single-line ``# `` comment without breaking out of it."""
+        return " ".join(str(value).split())
+
+    warnings: list[str] = []
+    describe = plan.get("describe")
+    states = plan.get("states") or []
+    model_name = plan.get("model_name")
+    title = model_name or plan_path.stem
+
+    measurements: list[dict] = []
+    measurement_comments: list[list[str]] = []  # parallel to measurements
+
+    # State keys this command maps into the manifest; every other key is a
+    # plan-only field with no manifest home and is preserved as a comment.
+    mapped_state_keys = {"name", "data", "extra_description", "back_reflection"}
+
+    for i, state in enumerate(states):
+        if not isinstance(state, dict):
+            raise click.ClickException(
+                f"Plan state {i + 1} is not a mapping (got {type(state).__name__})."
+            )
+        name = state.get("name") or f"state_{i + 1}"
+        data_files = state.get("data") or []
+        measurement: dict = {"name": name}
+        comments: list[str] = []
+
+        if data_files:
+            primary = data_files[0]
+            if data_dir is not None:
+                resolved = (data_dir / primary).resolve()
+                if not resolved.is_file():
+                    warnings.append(f"State '{name}': data file not found: {resolved}")
+                measurement["reduced"] = str(resolved)
+            else:
+                measurement["reduced"] = primary
+            if len(data_files) > 1:
+                siblings = _flat(", ".join(str(s) for s in data_files[1:]))
+                comments.append(
+                    f"primary reduced is data[0]; {len(data_files) - 1} sibling "
+                    f"partial(s) not merged: {siblings}"
+                )
+        else:
+            warnings.append(f"State '{name}': no data files; 'reduced' left empty.")
+            measurement["reduced"] = ""
+            comments.append("plan state had no 'data'; set 'reduced' before converting")
+
+        # extra_description feeds both fields, exactly as the plan conversion
+        # does: environment (→ enum classification) and context (→ series notes).
+        extra = state.get("extra_description")
+        if extra:
+            measurement["environment"] = extra
+
+        context_parts: list[str] = []
+        if extra:
+            context_parts.append(extra)
+        if state.get("back_reflection"):
+            context_parts.append(
+                "Measured in back-reflection geometry (beam enters from the substrate side)."
+            )
+        if context_parts:
+            measurement["context"] = " ".join(context_parts)
+
+        # Any other plan-only fields (theta_offset, sample_broadening,
+        # background, …) have no manifest analog → preserve them verbatim as
+        # comments. repr() keeps each on one line, so a newline in a value
+        # cannot break out of the comment.
+        for key, value in state.items():
+            if key not in mapped_state_keys:
+                comments.append(f"{key}: {value!r}  (plan-only; no manifest field)")
+
+        measurements.append(measurement)
+        measurement_comments.append(comments)
+
+    manifest_dict: dict = {"title": title}
+    sample: dict = {}
+    if describe:
+        sample["description"] = describe
+    if sample:
+        manifest_dict["sample"] = sample
+    manifest_dict["output"] = records_dir
+    manifest_dict["measurements"] = measurements
+
+    # --- render: provenance header (comments) + clean body + inline comments ---
+    lines: list[str] = [
+        f"# Manifest generated by nr-isaac-format {__version__} (plan-to-manifest)",
+        f"# Source plan: {plan_path}",
+        "#",
+        "# This plan is PRE-FIT: no layer model is attached. After fitting, add",
+        "#   sample.model: /path/to/model.json   # (or a per-measurement `model:`)",
+        "# and optionally sample.material, then run `nr-isaac-format convert <this file>`.",
+    ]
+    if model_name:
+        lines += ["#", f"# Plan model_name: {_flat(model_name)}"]
+    notes = (plan.get("metadata") or {}).get("notes")
+    if notes:
+        lines += ["#", "# Plan metadata.notes:"]
+        for paragraph in str(notes).splitlines() or [str(notes)]:
+            lines += [f"#   {line}" for line in (textwrap.wrap(paragraph, width=94) or [""])]
+
+    dump = lambda obj: yaml.safe_dump(  # noqa: E731
+        obj, sort_keys=False, allow_unicode=True, default_flow_style=False, width=4096
+    ).rstrip("\n")
+
+    top = {k: manifest_dict[k] for k in ("title", "sample", "output") if k in manifest_dict}
+    lines += ["", *dump(top).split("\n"), "", "measurements:"]
+    for measurement, comments in zip(measurements, measurement_comments):
+        lines += [f"# {c}" for c in comments]
+        lines += dump([measurement]).split("\n")
+
+    yaml_text = "\n".join(lines) + "\n"
+
+    # Self-check: the hand-composed document must round-trip to EXACTLY the
+    # structure we intended. Comparing full content (not just the measurement
+    # count) catches any comment/indent/escaping bug — including a stray newline
+    # that would inject or corrupt a key.
+    try:
+        check = yaml.safe_load(yaml_text)
+    except yaml.YAMLError as e:
+        raise click.ClickException(f"internal error: generated manifest is not valid YAML ({e}).")
+    if check != manifest_dict:
+        raise click.ClickException("internal error: generated manifest failed its self-check.")
+
+    return yaml_text, manifest_dict, warnings
+
+
+@main.command("plan-to-manifest")
+@click.argument("plan_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "-o",
+    "--output",
+    "output",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Manifest file to write, or a directory to write into. "
+    "Defaults to <plan>_manifest.yaml beside the plan.",
+)
+@click.option(
+    "-d",
+    "--data-dir",
+    "data_dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Directory holding the reduced data files; resolves the plan's bare "
+    "filenames to absolute `reduced:` paths. Without it, filenames are kept verbatim.",
+)
+@click.option(
+    "--records-dir",
+    "records_dir",
+    default="./output",
+    show_default=True,
+    help="Value for the manifest's required `output:` field (where `convert` "
+    "will write the ISAAC records).",
+)
+@click.option("--force", is_flag=True, help="Overwrite the manifest file if it already exists.")
+@click.option("--dry-run", is_flag=True, help="Print the manifest to stdout instead of writing.")
+def plan_to_manifest(
+    plan_file: Path,
+    output: Path | None,
+    data_dir: Path | None,
+    records_dir: str,
+    force: bool,
+    dry_run: bool,
+) -> None:
+    """Create a manifest.yaml from a pre-fit plan.yaml.
+
+    A plan's ``states`` become the manifest's ``measurements`` under one shared
+    sample, so the link between measurements that belong together — and the
+    sample's history — is preserved when the manifest is later converted: the
+    first measurement creates the sample record and the rest reuse its id.
+    Converting each state on its own instead would mint a fresh sample every
+    time and lose that connection.
+
+    PLAN_FILE is a pre-fit plan (``describe`` + ``states``). The output is a
+    manifest skeleton — because the plan is pre-fit it has no model; add
+    ``sample.model`` (or a per-measurement ``model:``) after fitting, then run
+    ``nr-isaac-format convert <manifest>``.
+
+    Example:
+
+        nr-isaac-format plan-to-manifest plan/job_230539.yaml -d Rawdata/
+
+    \b
+    Mapping:
+        describe                 → sample.description
+        states[].name            → measurements[].name
+        states[].data[0]         → measurements[].reduced (resolved against -d)
+        states[].extra_description → measurements[].environment + .context
+        states[].back_reflection → folded into measurements[].context (text)
+    """
+    import yaml
+
+    raw = yaml.safe_load(plan_file.read_text())
+    if not isinstance(raw, dict):
+        raise click.ClickException(f"{plan_file} is not a YAML mapping.")
+    if "states" not in raw:
+        if "measurements" in raw:
+            raise click.ClickException(
+                f"{plan_file} looks like a manifest already (has 'measurements', not 'states')."
+            )
+        raise click.ClickException(f"{plan_file} has no 'states' — it is not a plan.")
+    if not (raw.get("states") or []):
+        raise click.ClickException(f"{plan_file} has an empty 'states' list — nothing to convert.")
+
+    yaml_text, manifest_dict, warnings = _build_manifest_from_plan(
+        raw, plan_file, data_dir, records_dir
+    )
+
+    for warning in warnings:
+        click.echo(click.style(f"  Warning: {warning}", fg="yellow"), err=True)
+
+    if dry_run:
+        click.echo(yaml_text, nl=False)
+        return
+
+    # Resolve the output path: explicit file, a directory to write into, or the
+    # default <plan>_manifest.yaml beside the plan.
+    default_name = f"{plan_file.stem}_manifest.yaml"
+    if output is None:
+        out_path = plan_file.with_name(default_name)
+    elif output.is_dir() or output.suffix == "":
+        out_path = output / default_name
+    else:
+        out_path = output
+
+    if out_path.exists() and not force:
+        raise click.ClickException(f"{out_path} already exists — pass --force to overwrite.")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(yaml_text)
+
+    n = len(manifest_dict["measurements"])
+    click.echo(
+        click.style(f"Wrote manifest with {n} measurement(s): {out_path}", fg="green")
+    )
+    click.echo(f"  Next: nr-isaac-format convert {out_path}")
+
+
+# ---------------------------------------------------------------------------
 # convert-ingest command
 # ---------------------------------------------------------------------------
 

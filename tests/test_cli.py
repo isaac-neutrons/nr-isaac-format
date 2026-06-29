@@ -1023,3 +1023,285 @@ class TestConvertPlanCommand:
         result = runner.invoke(main, ["convert", str(plan), "-d", str(data_dir)])
         assert result.exit_code != 0
         assert "output" in result.output
+
+
+class TestPlanToManifestCommand:
+    """Tests for the plan-to-manifest command (plan.yaml → manifest.yaml)."""
+
+    def _write_plan(self, tmp_path, *, multi_state=False, extra_top=""):
+        """Write a realistic pre-fit plan and a data dir with its files."""
+        data_dir = tmp_path / "Rawdata"
+        data_dir.mkdir()
+        files = [
+            "REFL_230539_1_230539_partial.txt",
+            "REFL_230539_2_230540_partial.txt",
+            "REFL_230539_3_230541_partial.txt",
+        ]
+        for f in files:
+            (data_dir / f).write_text("# dummy reduced data\n")
+
+        states = (
+            "- name: run_230539\n"
+            "  data:\n"
+            "  - REFL_230539_1_230539_partial.txt\n"
+            "  - REFL_230539_2_230540_partial.txt\n"
+            "  - REFL_230539_3_230541_partial.txt\n"
+            "  theta_offset: true\n"
+            "  sample_broadening: true\n"
+            "  back_reflection: true\n"
+            "  extra_description: OCV measurement in D2O electrolyte (pH 8.25).\n"
+        )
+        if multi_state:
+            (data_dir / "REFL_230543_1.txt").write_text("# dummy\n")
+            states += (
+                "- name: run_230543\n"
+                "  data:\n"
+                "  - REFL_230543_1.txt\n"
+                "  back_reflection: false\n"
+                "  extra_description: Final OCV in D2O.\n"
+            )
+
+        plan = tmp_path / "job_230539.yaml"
+        plan.write_text(
+            "describe: D2O / Cu oxide / 50 nm Cu / 3 nm Ti on Si (back reflection)\n"
+            "model_name: cu_ocv_230539\n" + extra_top + "states:\n" + states
+        )
+        return plan, data_dir
+
+    def test_writes_manifest_default_path(self, runner, tmp_path):
+        """Default output is <plan>_manifest.yaml beside the plan."""
+        plan, data_dir = self._write_plan(tmp_path)
+
+        result = runner.invoke(main, ["plan-to-manifest", str(plan), "-d", str(data_dir)])
+
+        assert result.exit_code == 0, result.output
+        out_path = tmp_path / "job_230539_manifest.yaml"
+        assert out_path.exists()
+        assert "Wrote manifest with 1 measurement" in result.output
+
+    def test_manifest_round_trips_through_parser(self, runner, tmp_path):
+        """The generated manifest must be consumable by the assembler parser."""
+        from assembler.parsers import ManifestParser
+
+        plan, data_dir = self._write_plan(tmp_path, multi_state=True)
+
+        result = runner.invoke(main, ["plan-to-manifest", str(plan), "-d", str(data_dir)])
+        assert result.exit_code == 0, result.output
+
+        out_path = tmp_path / "job_230539_manifest.yaml"
+        manifest = ManifestParser().parse(out_path)
+        # No structural OR file errors (data files exist via data_dir resolution).
+        assert manifest.validate(check_files=True) == []
+        assert manifest.title == "cu_ocv_230539"
+        assert manifest.sample.description == "D2O / Cu oxide / 50 nm Cu / 3 nm Ti on Si (back reflection)"
+        assert [m.name for m in manifest.measurements] == ["run_230539", "run_230543"]
+
+    def test_field_mapping(self, runner, tmp_path):
+        """describe→sample, data[0]→reduced (abs), extra→environment+context, geometry folded."""
+        import yaml
+
+        plan, data_dir = self._write_plan(tmp_path)
+        result = runner.invoke(main, ["plan-to-manifest", str(plan), "-d", str(data_dir)])
+        assert result.exit_code == 0, result.output
+
+        loaded = yaml.safe_load((tmp_path / "job_230539_manifest.yaml").read_text())
+        m = loaded["measurements"][0]
+        # primary file resolved to an absolute path that exists
+        assert m["reduced"] == str((data_dir / "REFL_230539_1_230539_partial.txt").resolve())
+        # extra_description drives environment; context = extra + folded geometry note
+        assert m["environment"] == "OCV measurement in D2O electrolyte (pH 8.25)."
+        assert m["context"].startswith("OCV measurement in D2O electrolyte (pH 8.25).")
+        assert "back-reflection geometry" in m["context"]
+        # required manifest output field is set from the default
+        assert loaded["output"] == "./output"
+
+    def test_plan_only_fields_become_comments(self, runner, tmp_path):
+        """model_name, fit-control fields, and siblings appear as comments."""
+        plan, data_dir = self._write_plan(tmp_path)
+        result = runner.invoke(main, ["plan-to-manifest", str(plan), "-d", str(data_dir)])
+        assert result.exit_code == 0, result.output
+
+        text = (tmp_path / "job_230539_manifest.yaml").read_text()
+        assert "# Plan model_name: cu_ocv_230539" in text
+        assert "theta_offset" in text and "sample_broadening" in text
+        assert "sibling" in text  # the 2 unmerged partial siblings are noted
+        assert "PRE-FIT" in text  # header reminds the user to add a model
+
+    def test_bare_filenames_without_data_dir(self, runner, tmp_path):
+        """Without -d, the plan's bare filenames are kept verbatim."""
+        import yaml
+
+        plan, _ = self._write_plan(tmp_path)
+        result = runner.invoke(main, ["plan-to-manifest", str(plan)])
+        assert result.exit_code == 0, result.output
+
+        loaded = yaml.safe_load((tmp_path / "job_230539_manifest.yaml").read_text())
+        assert loaded["measurements"][0]["reduced"] == "REFL_230539_1_230539_partial.txt"
+
+    def test_records_dir_option(self, runner, tmp_path):
+        """--records-dir sets the manifest's `output:` field."""
+        import yaml
+
+        plan, data_dir = self._write_plan(tmp_path)
+        result = runner.invoke(
+            main,
+            ["plan-to-manifest", str(plan), "-d", str(data_dir), "--records-dir", "/srv/records"],
+        )
+        assert result.exit_code == 0, result.output
+        loaded = yaml.safe_load((tmp_path / "job_230539_manifest.yaml").read_text())
+        assert loaded["output"] == "/srv/records"
+
+    def test_dry_run_prints_and_does_not_write(self, runner, tmp_path):
+        """--dry-run prints the manifest and writes nothing."""
+        plan, data_dir = self._write_plan(tmp_path)
+        result = runner.invoke(
+            main, ["plan-to-manifest", str(plan), "-d", str(data_dir), "--dry-run"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "measurements:" in result.output
+        assert not (tmp_path / "job_230539_manifest.yaml").exists()
+
+    def test_refuses_to_overwrite_without_force(self, runner, tmp_path):
+        """An existing manifest is not clobbered unless --force is given."""
+        plan, data_dir = self._write_plan(tmp_path)
+        out_path = tmp_path / "job_230539_manifest.yaml"
+        out_path.write_text("# hand-edited — do not lose\n")
+
+        result = runner.invoke(main, ["plan-to-manifest", str(plan), "-d", str(data_dir)])
+        assert result.exit_code != 0
+        assert "already exists" in result.output
+        assert out_path.read_text() == "# hand-edited — do not lose\n"
+
+        forced = runner.invoke(
+            main, ["plan-to-manifest", str(plan), "-d", str(data_dir), "--force"]
+        )
+        assert forced.exit_code == 0, forced.output
+        assert "do not lose" not in out_path.read_text()
+
+    def test_output_to_directory(self, runner, tmp_path):
+        """-o pointing at a directory writes <plan>_manifest.yaml inside it."""
+        plan, data_dir = self._write_plan(tmp_path)
+        out_dir = tmp_path / "manifests"
+
+        result = runner.invoke(
+            main, ["plan-to-manifest", str(plan), "-d", str(data_dir), "-o", str(out_dir)]
+        )
+        assert result.exit_code == 0, result.output
+        assert (out_dir / "job_230539_manifest.yaml").exists()
+
+    def test_rejects_manifest_input(self, runner, tmp_path):
+        """A manifest (no `states`) is rejected with a helpful message."""
+        manifest = tmp_path / "expt.yaml"
+        manifest.write_text("title: x\noutput: ./out\nmeasurements:\n- name: m1\n  reduced: r.txt\n")
+        result = runner.invoke(main, ["plan-to-manifest", str(manifest)])
+        assert result.exit_code != 0
+        assert "manifest already" in result.output
+
+    def test_rejects_plan_without_states(self, runner, tmp_path):
+        """A plan with no states is rejected."""
+        plan = tmp_path / "bad.yaml"
+        plan.write_text("describe: just a description\n")
+        result = runner.invoke(main, ["plan-to-manifest", str(plan)])
+        assert result.exit_code != 0
+        assert "states" in result.output
+
+    def test_rejects_non_mapping_state(self, runner, tmp_path):
+        """A scalar state element fails with a friendly error, not a traceback."""
+        plan = tmp_path / "p.yaml"
+        plan.write_text("describe: s\nstates:\n- just_a_string\n")
+        result = runner.invoke(main, ["plan-to-manifest", str(plan)])
+        assert result.exit_code != 0
+        assert "not a mapping" in result.output
+
+    def test_state_without_data_warns_and_leaves_reduced_empty(self, runner, tmp_path):
+        """A state with no data files warns and writes an empty `reduced:` skeleton."""
+        import yaml
+
+        plan = tmp_path / "p.yaml"
+        plan.write_text("describe: s\nmodel_name: m\nstates:\n- name: s1\n  extra_description: x\n")
+        result = runner.invoke(main, ["plan-to-manifest", str(plan)])
+        assert result.exit_code == 0, result.output
+        assert "no data files" in result.output  # warning surfaced
+
+        text = (tmp_path / "p_manifest.yaml").read_text()
+        assert yaml.safe_load(text)["measurements"][0]["reduced"] == ""
+        assert "set 'reduced' before converting" in text  # inline guidance comment
+
+    def test_title_falls_back_to_plan_stem(self, runner, tmp_path):
+        """With no model_name, the title is the plan filename stem."""
+        import yaml
+
+        data_dir = tmp_path / "Rawdata"
+        data_dir.mkdir()
+        (data_dir / "a.txt").write_text("# dummy\n")
+        plan = tmp_path / "job_999.yaml"
+        plan.write_text("describe: s\nstates:\n- name: s1\n  data:\n  - a.txt\n")
+
+        result = runner.invoke(main, ["plan-to-manifest", str(plan), "-d", str(data_dir)])
+        assert result.exit_code == 0, result.output
+        loaded = yaml.safe_load((tmp_path / "job_999_manifest.yaml").read_text())
+        assert loaded["title"] == "job_999"
+
+    def test_back_reflection_false_omits_geometry_note(self, runner, tmp_path):
+        """A state with back_reflection: false gets no folded geometry sentence."""
+        import yaml
+
+        plan, data_dir = self._write_plan(tmp_path, multi_state=True)
+        result = runner.invoke(main, ["plan-to-manifest", str(plan), "-d", str(data_dir)])
+        assert result.exit_code == 0, result.output
+
+        second = yaml.safe_load((tmp_path / "job_230539_manifest.yaml").read_text())["measurements"][1]
+        assert second["context"] == "Final OCV in D2O."
+        assert "back-reflection geometry" not in second["context"]
+
+    def test_arbitrary_plan_only_fields_preserved_as_comments(self, runner, tmp_path):
+        """Any unmapped per-state field (e.g. `background`) becomes a comment."""
+        data_dir = tmp_path / "Rawdata"
+        data_dir.mkdir()
+        (data_dir / "a.txt").write_text("# dummy\n")
+        plan = tmp_path / "p.yaml"
+        plan.write_text(
+            "describe: s\nstates:\n- name: s1\n  data:\n  - a.txt\n"
+            "  background: true\n  fit_scale: 1.5\n"
+        )
+
+        result = runner.invoke(main, ["plan-to-manifest", str(plan), "-d", str(data_dir)])
+        assert result.exit_code == 0, result.output
+        text = (tmp_path / "p_manifest.yaml").read_text()
+        assert "background: True  (plan-only; no manifest field)" in text
+        assert "fit_scale: 1.5  (plan-only; no manifest field)" in text
+
+    def test_output_to_explicit_yaml_file(self, runner, tmp_path):
+        """-o pointing at an explicit .yaml file writes exactly that path."""
+        plan, data_dir = self._write_plan(tmp_path)
+        out_file = tmp_path / "custom.yaml"
+
+        result = runner.invoke(
+            main, ["plan-to-manifest", str(plan), "-d", str(data_dir), "-o", str(out_file)]
+        )
+        assert result.exit_code == 0, result.output
+        assert out_file.exists()
+        assert not (tmp_path / "job_230539_manifest.yaml").exists()
+
+    def test_newline_in_model_name_does_not_inject_keys(self, runner, tmp_path):
+        """A newline in a comment-interpolated value cannot inject a YAML key."""
+        import yaml
+
+        data_dir = tmp_path / "Rawdata"
+        data_dir.mkdir()
+        (data_dir / "a.txt").write_text("# dummy\n")
+        plan = tmp_path / "p.yaml"
+        # model_name carries a newline whose 2nd line looks like a top-level key.
+        plan.write_text(
+            'describe: s\nmodel_name: "cu\\nnotes: injected"\n'
+            "states:\n- name: s1\n  data:\n  - a.txt\n"
+        )
+
+        result = runner.invoke(main, ["plan-to-manifest", str(plan), "-d", str(data_dir)])
+        assert result.exit_code == 0, result.output
+        text = (tmp_path / "p_manifest.yaml").read_text()
+        loaded = yaml.safe_load(text)
+        # The header comment is flattened to one line; no `notes:` key leaks in.
+        assert "# Plan model_name: cu notes: injected" in text
+        assert "notes" not in loaded
+        assert loaded["title"] == "cu\nnotes: injected"  # body value round-trips faithfully

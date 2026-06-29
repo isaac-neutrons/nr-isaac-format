@@ -156,6 +156,35 @@ nr-isaac-format convert experiment.yaml
 nr-isaac-format convert plan/job_230539.yaml -d Rawdata/ -o records/
 ```
 
+### `nr-isaac-format plan-to-manifest`
+
+Create a `manifest.yaml` from a pre-fit `plan.yaml`. A plan's `states` become the manifest's `measurements` under **one shared sample**, so measurements that belong together stay grouped as one sample's history. When the manifest is converted, the assembler builds the sample once from the first measurement and reuses that sample identity for the rest, rather than treating each state as an unrelated one-off the way separate conversions would.
+
+The plan is pre-fit, so the generated manifest is a skeleton with no model — add `sample.model` (or a per-measurement `model:`), and optionally `sample.material`, after fitting, then run `convert`.
+
+```bash
+nr-isaac-format plan-to-manifest [OPTIONS] PLAN_FILE
+```
+
+| Option | Description |
+|--------|-------------|
+| `-o, --output PATH` | Manifest file to write, or a directory to write into. Defaults to `<plan>_manifest.yaml` beside the plan. |
+| `-d, --data-dir DIR` | Directory holding the reduced data files; resolves the plan's bare filenames to absolute `reduced:` paths. Without it, filenames are kept verbatim. |
+| `--records-dir DIR` | Value for the manifest's required `output:` field (where `convert` writes records). Default `./output`. |
+| `--force` | Overwrite the manifest file if it already exists. |
+| `--dry-run` | Print the manifest to stdout instead of writing. |
+
+```bash
+# one plan → one manifest; bare filenames resolved against -d
+nr-isaac-format plan-to-manifest plan/job_230539.yaml -d Rawdata/
+# → wrote plan/job_230539_manifest.yaml
+nr-isaac-format convert plan/job_230539_manifest.yaml   # after adding a model
+```
+
+Field mapping: `describe` → `sample.description`; `states[].name` → `measurements[].name`; `states[].data[0]` → `measurements[].reduced` (primary partial; siblings noted, not merged); `states[].extra_description` → `measurements[].environment` + `.context`; `states[].back_reflection` → folded into `measurements[].context` as a geometry note. Plan-only fields (`model_name`, `metadata.notes`, and any other per-state fields such as `theta_offset`, `sample_broadening`, `background`) are preserved as YAML comments.
+
+Note: because the manifest has no structured slot for geometry, back-reflection is recorded as free text in `context` only — so unlike `convert <plan>` (which sets a structured `measurement_geometry` descriptor), the manifest round-trip does not emit that descriptor.
+
 ### `nr-isaac-format validate`
 
 Validate an ISAAC record against the local schema. Automatically uses the latest `ornl-rev*` schema if available.
@@ -256,6 +285,8 @@ states:
 
 Because a plan is pre-fit, no layer model is assembled — the record captures the measured reflectivity, the sample/measurement descriptions, and any applied potential, but not fitted layer parameters.
 
+To turn a plan into an editable, fit-ready **manifest** instead of records — keeping all its states tied to one sample so you can add a model after fitting — use [`plan-to-manifest`](#nr-isaac-format-plan-to-manifest).
+
 ## Environment Configuration
 
 API commands (`push`, `health`, `fetch-schema`) require credentials. These are read from a `.env` file in the working directory or via environment variables:
@@ -339,7 +370,7 @@ ruff check src/ tests/
 ```
 src/nr_isaac_format/
 ├── __init__.py        # Package init, exports IsaacWriter
-├── cli.py             # Click CLI (convert, validate, push, health, fetch-schema)
+├── cli.py             # Click CLI (convert, convert-ingest, plan-to-manifest, update, migrate, validate, push, health, fetch-schema)
 ├── client.py          # ISAAC Portal API client (httpx)
 ├── writer.py          # AssemblyResult → ISAAC record conversion
 └── schema/
