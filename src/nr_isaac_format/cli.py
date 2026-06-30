@@ -898,6 +898,48 @@ def _load_states_from_ingest(ingest_dir: Path) -> list:
     return results
 
 
+def _wire_same_sample_links(records: list[dict]) -> None:
+    """Cross-link ISAAC records that measured the same physical sample, in place.
+
+    Records sharing a ``sample.sample_id`` get reciprocal ``same_sample_as``
+    links (``rel=same_sample_as``, ``basis=same_sample_id``) targeting each
+    other's ``record_id`` — the ISAAC schema's mechanism for asserting "these
+    records are the same physical object." This is the multi-state co-refinement
+    of ONE sample (the default): every per-state record points at its siblings.
+
+    Records with no ``sample_id``, or a unique one (e.g. a ``distinct_sample``
+    co-refinement, where each state is a different physical sample), are left
+    unlinked. Idempotent: an existing identical link is not duplicated.
+    """
+    groups: dict[str, list[dict]] = {}
+    for rec in records:
+        sample = rec.get("sample") if isinstance(rec, dict) else None
+        sid = sample.get("sample_id") if isinstance(sample, dict) else None
+        if sid:
+            groups.setdefault(str(sid), []).append(rec)
+
+    for group in groups.values():
+        if len(group) < 2:
+            continue  # a lone record has no sibling to link to
+        for rec in group:
+            links = rec.setdefault("links", [])
+            existing = {(lk.get("rel"), lk.get("target")) for lk in links}
+            for other in group:
+                target = other.get("record_id")
+                if other is rec or not target:
+                    continue
+                if ("same_sample_as", target) in existing:
+                    continue
+                links.append(
+                    {
+                        "rel": "same_sample_as",
+                        "target": target,
+                        "basis": "same_sample_id",
+                    }
+                )
+                existing.add(("same_sample_as", target))
+
+
 @main.command("convert-ingest")
 @click.argument(
     "ingest_dir",
@@ -1022,7 +1064,11 @@ def convert_ingest(
         raise click.UsageError(msg)
 
     writer = IsaacWriter()
-    written: list[Path] = []
+    # Pass 1: build every record (record_id assigned here). We build all records
+    # before writing so per-state records of one physical sample can be
+    # cross-linked by record_id (same_sample_as) — a forward reference no
+    # single-record pass could resolve.
+    built: list[tuple] = []  # (run_number, record)
     for state in states:
         refl = state.reflectivity or {}
         run_number = refl.get("run_number")
@@ -1046,11 +1092,22 @@ def convert_ingest(
             sample_name=sample_name,
             sample_formula=sample_formula,
         )
+        built.append((run_number, record))
 
-        if dry_run:
-            click.echo(click.style("  (dry run — not written)", fg="cyan"))
-            continue
+    # Cross-link records that measured the SAME physical sample (multi-state
+    # co-refinement of one sample → reciprocal same_sample_as). distinct_sample
+    # states carry distinct sample_ids upstream and stay unlinked.
+    _wire_same_sample_links([rec for _, rec in built])
+    n_links = sum(len(rec.get("links") or []) for _, rec in built)
+    if n_links:
+        click.echo(f"  Linked {n_links} same_sample_as relation(s) across states")
 
+    if dry_run:
+        click.echo(click.style(f"  (dry run — {len(built)} record(s) not written)", fg="cyan"))
+        return
+
+    written: list[Path] = []
+    for run_number, record in built:
         out_dir.mkdir(parents=True, exist_ok=True)
         if out_file_explicit is not None:
             out_file = out_file_explicit
@@ -1068,9 +1125,6 @@ def convert_ingest(
             json.dump(record, f, indent=None if compact else 2, default=str)
         written.append(out_file)
         click.echo(click.style(f"  Wrote: {out_file}", fg="green"))
-
-    if dry_run:
-        return
 
     if result_out is not None:
         if len(written) == 1:

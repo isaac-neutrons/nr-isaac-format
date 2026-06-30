@@ -111,12 +111,19 @@ class IsaacWriter:
             record["measurement"] = measurement_block
             description_placed = bool(measurement_description)
 
+        # Stable physical-sample identity. Prefer the assembled sample record's
+        # ``id``; fall back to the reflectivity's ``sample_id`` FK when no sample
+        # record is present (e.g. an externally reused sample). Records of one
+        # physical sample share this; distinct-sample states differ.
+        resolved_sample_id = (result.sample or {}).get("id") or refl.get("sample_id")
+
         # Optional sample block
         if result.sample:
             sample_block = self._map_sample(
                 result.sample,
                 sample_name=sample_name,
                 sample_formula=sample_formula,
+                sample_id=resolved_sample_id,
             )
             if sample_block:
                 record["sample"] = sample_block
@@ -127,7 +134,10 @@ class IsaacWriter:
             }
             if sample_name:
                 material["notes"] = sample_name
-            record["sample"] = {"sample_form": "film", "material": material}
+            sample_block = {"sample_form": "film", "material": material}
+            if resolved_sample_id:
+                sample_block["sample_id"] = str(resolved_sample_id)
+            record["sample"] = sample_block
 
         # Context block (rev3/rev4: typed fields only). Prefer the data-assembler's
         # structured electrochemical conditions (control_mode/potential/electrolyte/
@@ -548,12 +558,22 @@ class IsaacWriter:
         sample: dict,
         sample_name: str | None = None,
         sample_formula: str | None = None,
+        sample_id: str | None = None,
     ) -> dict[str, Any] | None:
-        """Map sample record to ISAAC sample block."""
+        """Map sample record to ISAAC sample block.
+
+        ``sample_id`` is the stable identifier of the PHYSICAL sample (the
+        data-assembler's sample FK). Two records carry the same ``sample_id``
+        iff they measured the same physical object — which is what gives
+        ``links[].same_sample_as`` its meaning. Distinct-sample co-refinements
+        carry a different id per state, so their records do not share one.
+        """
         if not sample:
             return None
 
         result: dict[str, Any] = {"sample_form": "film"}
+        if sample_id:
+            result["sample_id"] = str(sample_id)
 
         composition = sample.get("main_composition")
         # Use manifest sample info when assembler composition is missing or unknown

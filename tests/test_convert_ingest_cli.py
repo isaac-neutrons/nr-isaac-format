@@ -10,6 +10,7 @@ and the manifest output.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -114,11 +115,17 @@ def test_default_output_lands_in_ingest_dir(runner, tmp_path, ingest_dir):
     assert (ingest_dir / "isaac_record_218386.json").is_file()
 
 
-def _write_json_ingest(tmp_path, runs, *, sample_id="S", env_ids=None):
-    """Build a real per-run JSON ingest dir (one reflectivity.json per run)."""
+def _write_json_ingest(tmp_path, runs, *, sample_id="S", sample_ids=None, env_ids=None):
+    """Build a real per-run JSON ingest dir (one reflectivity.json per run).
+
+    ``sample_ids`` (dict run→sample_id) overrides the single shared ``sample_id``
+    to model distinct physical samples across states; one sample record is
+    written per distinct id (the ``sample/<id>.json`` multi-state layout).
+    """
     ingest = tmp_path / "assembled"
     jdir = ingest / "json"
     env_ids = env_ids or {r: "E" for r in runs}
+    sids = sample_ids or {r: sample_id for r in runs}
     for i, run in enumerate(runs):
         rd = jdir / run
         rd.mkdir(parents=True)
@@ -134,14 +141,26 @@ def _write_json_ingest(tmp_path, runs, *, sample_id="S", env_ids=None):
                     "r": [0.9, 0.8, 0.7],
                     "dr": [0.01, 0.01, 0.01],
                     "dq": [0.001, 0.001, 0.001],
-                    "sample_id": sample_id,
+                    "sample_id": sids[run],
                     "environment_id": env_ids[run],
                 }
             )
         )
-    (jdir / "sample.json").write_text(
-        json.dumps({"id": sample_id, "description": "Cu", "main_composition": "Cu", "formula": "Cu"})
-    )
+    distinct_sids = sorted(set(sids.values()))
+    if len(distinct_sids) <= 1:
+        only = distinct_sids[0] if distinct_sids else sample_id
+        (jdir / "sample.json").write_text(
+            json.dumps({"id": only, "description": "Cu", "main_composition": "Cu", "formula": "Cu"})
+        )
+    else:
+        sdir = jdir / "sample"
+        sdir.mkdir()
+        for sid in distinct_sids:
+            (sdir / f"{sid}.json").write_text(
+                json.dumps(
+                    {"id": sid, "description": f"sample {sid}", "main_composition": "Cu", "formula": "Cu"}
+                )
+            )
     # One environment record per distinct env id (multi-state layout).
     distinct_envs = sorted(set(env_ids.values()))
     if len(distinct_envs) <= 1:
@@ -195,6 +214,80 @@ def test_multi_state_splits_into_per_state_records(runner, tmp_path):
     rec_h2o = json.loads((out / "isaac_record_3.json").read_text())
     assert {s["series_id"] for s in rec_d2o["measurement"]["series"]} == {"run_1", "run_2"}
     assert {s["series_id"] for s in rec_h2o["measurement"]["series"]} == {"run_3", "run_4"}
+
+
+def test_multi_state_same_sample_links_records(runner, tmp_path):
+    """Two states of ONE physical sample (shared sample_id) → reciprocal
+    same_sample_as links between their records, and a shared sample.sample_id."""
+    ingest = _write_json_ingest(
+        tmp_path,
+        ["1", "2", "3", "4"],
+        sample_id="S",  # all states share the one physical sample
+        env_ids={"1": "E_D2O", "2": "E_D2O", "3": "E_H2O", "4": "E_H2O"},
+    )
+    out = tmp_path / "out"
+    result = runner.invoke(main, ["convert-ingest", str(ingest), "-o", str(out)])
+    assert result.exit_code == 0, result.output
+    assert "same_sample_as" in result.output
+
+    rec_d2o = json.loads((out / "isaac_record_1.json").read_text())
+    rec_h2o = json.loads((out / "isaac_record_3.json").read_text())
+    # Both records carry the same physical-sample identity.
+    assert rec_d2o["sample"]["sample_id"] == "S"
+    assert rec_h2o["sample"]["sample_id"] == "S"
+    # Each links to the other (reciprocal), with the same_sample_id basis.
+    d2o_links = rec_d2o["links"]
+    h2o_links = rec_h2o["links"]
+    assert len(d2o_links) == 1 and len(h2o_links) == 1
+    assert d2o_links[0]["rel"] == "same_sample_as"
+    assert d2o_links[0]["basis"] == "same_sample_id"
+    assert d2o_links[0]["target"] == rec_h2o["record_id"]
+    assert h2o_links[0]["target"] == rec_d2o["record_id"]
+
+
+def test_distinct_sample_states_are_not_linked(runner, tmp_path):
+    """distinct_sample co-refinement (a sample per state) → distinct
+    sample.sample_id per record and NO same_sample_as links."""
+    ingest = _write_json_ingest(
+        tmp_path,
+        ["1", "2", "3", "4"],
+        sample_ids={"1": "S_A", "2": "S_A", "3": "S_B", "4": "S_B"},
+        env_ids={"1": "E_D2O", "2": "E_D2O", "3": "E_H2O", "4": "E_H2O"},
+    )
+    out = tmp_path / "out"
+    result = runner.invoke(main, ["convert-ingest", str(ingest), "-o", str(out)])
+    assert result.exit_code == 0, result.output
+    assert "same_sample_as" not in result.output
+
+    rec_a = json.loads((out / "isaac_record_1.json").read_text())
+    rec_b = json.loads((out / "isaac_record_3.json").read_text())
+    assert rec_a["sample"]["sample_id"] == "S_A"
+    assert rec_b["sample"]["sample_id"] == "S_B"
+    assert not rec_a.get("links")
+    assert not rec_b.get("links")
+
+
+def test_convert_ingest_records_validate_against_schema(runner, tmp_path):
+    """The emitted multi-state records (with sample_id + links) are schema-valid."""
+    import jsonschema
+
+    from nr_isaac_format.cli import _find_latest_schema
+
+    schema_dir = Path(__file__).resolve().parents[1] / "src" / "nr_isaac_format" / "schema"
+    schema = json.loads(_find_latest_schema(schema_dir).read_text())
+
+    ingest = _write_json_ingest(
+        tmp_path,
+        ["1", "2", "3", "4"],
+        sample_id="S",
+        env_ids={"1": "E_D2O", "2": "E_D2O", "3": "E_H2O", "4": "E_H2O"},
+    )
+    out = tmp_path / "out"
+    result = runner.invoke(main, ["convert-ingest", str(ingest), "-o", str(out)])
+    assert result.exit_code == 0, result.output
+
+    for rec_file in sorted(out.glob("isaac_record_*.json")):
+        jsonschema.validate(json.loads(rec_file.read_text()), schema)
 
 
 def test_multi_state_explicit_json_file_errors(runner, tmp_path):

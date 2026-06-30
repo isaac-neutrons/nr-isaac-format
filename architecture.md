@@ -37,6 +37,8 @@ grouping recoverable from foreign keys (`sample_id`, `environment_id`). nr-isaac
 |---|---|
 | one reflectivity run | one `measurement.series` |
 | a state = runs sharing `(sample_id, environment_id)` | one record, N series |
+| the run's `sample_id` FK | `sample.sample_id` (stable physical-sample identity) |
+| runs sharing one `sample_id` across states | records cross-linked via `links[].same_sample_as` |
 | a co-refinement fit over N runs | shared descriptors across the per-state records |
 
 ## 4. Multi-series and multi-state (the key behaviors)
@@ -60,6 +62,17 @@ Decision: a multi-state co-refinement therefore produces **N records sharing a s
 one merged record. `convert-ingest` writes one file per state (named by the state's primary
 run); `--result-out` reports `isaac_record` for one record or `isaac_records` (a list) for N.
 An explicit `.json` `-o` target is rejected when N > 1 (can't write N records to one file).
+
+- **Sample identity + same-sample links.** Every record carries `sample.sample_id` — the
+  data-assembler's `sample_id` FK (preferred from the sample record's `id`, else the
+  reflectivity's FK), the schema's stable physical-sample identity. `convert-ingest` builds all
+  records first, then `_wire_same_sample_links` adds reciprocal `links[]` entries
+  (`rel: same_sample_as`, `basis: same_sample_id`, `target:` the sibling's `record_id`) between
+  records that share a `sample_id`. This is why records are built before any is written — the
+  link target is another record's freshly minted ULID. A `distinct_sample` co-refinement carries
+  a **distinct** `sample_id` per state upstream, so its records get distinct `sample.sample_id`
+  and are **not** linked. `distinct_sample` is the data-assembler/AuRE identity decision; this
+  package only represents the FKs it finds.
 
 ## 5. The fit → descriptors mapping
 
