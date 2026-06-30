@@ -604,6 +604,14 @@ class IsaacWriter:
         if sample_name and "material" in result:
             result["material"]["notes"] = sample_name
 
+        # ``material`` is schema-required alongside ``sample_form``. When neither
+        # an assembler composition nor a manifest name/formula is available
+        # (e.g. an externally reused sample carrying only a sample_id FK), still
+        # emit a minimal material so the block validates and the sample_id
+        # identity is preserved rather than dropped.
+        if "material" not in result:
+            result["material"] = {"name": "unknown"}
+
         # ``sample.geometry`` in schema rev3/rev4 is defined with a contradictory
         # ``{"type": "object", "enum": [<string keys>]}`` shape that no concrete
         # object can satisfy.  Until the schema is corrected upstream we omit

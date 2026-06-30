@@ -290,6 +290,24 @@ def test_convert_ingest_records_validate_against_schema(runner, tmp_path):
         jsonschema.validate(json.loads(rec_file.read_text()), schema)
 
 
+def test_resolve_fk_exact_single_and_missing():
+    """FK resolution: exact match wins; single-record fallback for a missing key
+    (single-sample backward compat); a missing key with multiple records → None
+    (never inject an arbitrary record, which would forge a same-sample link)."""
+    from nr_isaac_format.cli import _resolve_fk
+
+    one = {"A": {"id": "A"}}
+    assert _resolve_fk(one, "A") == {"id": "A"}
+    assert _resolve_fk(one, None) == {"id": "A"}  # lone record: attach despite missing FK
+    assert _resolve_fk(one, "Z") == {"id": "A"}  # lone record: still the only candidate
+
+    many = {"A": {"id": "A"}, "B": {"id": "B"}}
+    assert _resolve_fk(many, "B") == {"id": "B"}
+    assert _resolve_fk(many, "Z") is None  # absent FK + ambiguous → no arbitrary pick
+    assert _resolve_fk(many, None) is None
+    assert _resolve_fk({}, "A") is None
+
+
 def test_multi_state_explicit_json_file_errors(runner, tmp_path):
     """A .json -o with multiple states is rejected (can't write N records to one file)."""
     ingest = _write_json_ingest(tmp_path, ["1", "2"], env_ids={"1": "E_a", "2": "E_b"})

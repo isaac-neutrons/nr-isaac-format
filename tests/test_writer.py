@@ -155,6 +155,19 @@ class TestIsaacWriter:
         )
         record = IsaacWriter().to_isaac(result, sample_name="Cu on Si")
         assert record["sample"]["sample_id"] == "phys-sample-2"
+
+    def test_sample_id_only_block_keeps_required_material(self):
+        """A sample carrying only an id (no composition, no manifest names) still
+        emits a schema-valid block: sample_id preserved AND material present."""
+        result = create_mock_result(
+            reflectivity={"facility": "SNS"},
+            sample={"id": "phys-sample-3"},  # no main_composition
+        )
+        record = IsaacWriter().to_isaac(result)
+        assert record["sample"]["sample_id"] == "phys-sample-3"
+        # material is schema-required alongside sample_form.
+        assert "material" in record["sample"]
+        assert record["sample"]["material"].get("name")
         # Schema rev3 has a self-contradictory geometry definition; the writer
         # omits the geometry block entirely until upstream is fixed.
         assert "geometry" not in record["sample"]

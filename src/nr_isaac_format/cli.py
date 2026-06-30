@@ -890,12 +890,29 @@ def _load_states_from_ingest(ingest_dir: Path) -> list:
             _assembly_result(
                 reflectivity=runs[0],
                 additional=runs[1:],
-                sample=samples_by_id.get(sid) or (next(iter(samples_by_id.values()), None)),
-                environment=envs_by_id.get(eid) or (next(iter(envs_by_id.values()), None)),
+                sample=_resolve_fk(samples_by_id, sid),
+                environment=_resolve_fk(envs_by_id, eid),
                 fit=fit,
             )
         )
     return results
+
+
+def _resolve_fk(by_id: dict, key):
+    """Resolve a state's sample/environment record from its foreign key.
+
+    An exact FK match always wins. Only when the store holds exactly ONE record
+    do we fall back to it for a missing/None key — the single-sample (or
+    single-environment) layout where older runs may carry no FK. With multiple
+    records an absent FK must NOT grab an arbitrary one: that would stamp a wrong
+    ``sample_id`` onto the record and trigger spurious ``same_sample_as`` links.
+    Returning ``None`` lets the writer fall back to the run-level FK instead.
+    """
+    if key in by_id:
+        return by_id[key]
+    if len(by_id) == 1:
+        return next(iter(by_id.values()))
+    return None
 
 
 def _wire_same_sample_links(records: list[dict]) -> None:
