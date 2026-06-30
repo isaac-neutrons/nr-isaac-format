@@ -71,6 +71,12 @@ class IsaacWriter:
         """
         now = datetime.now(timezone.utc)
         refl = result.reflectivity or {}
+        # All runs of this measurement state (partials/angles). One AssemblyResult
+        # = one state → one record with one series per run. Use the real
+        # ``reflectivities`` list when present; otherwise fall back to the single
+        # primary record (also keeps mocked results well-behaved).
+        _refls = getattr(result, "reflectivities", None)
+        refl_list = _refls if isinstance(_refls, list) else ([refl] if refl else [])
 
         # Resolve the environment record, augmenting it with the manifest's
         # environment text when the assembler did not supply one.
@@ -90,14 +96,16 @@ class IsaacWriter:
             "source_type": "facility",
             "timestamps": self._map_timestamps(refl, now),
             "descriptors": self._map_descriptors(
-                refl, now, getattr(result, "reflectivity_model", None)
+                refl_list,
+                now,
+                self._select_state_fit(getattr(result, "reflectivity_model", None), refl_list),
             ),
         }
 
         # The free-text description rides on measurement.series[].notes, where it
         # is directly readable (rev4 closes the top-level, context, and
         # measurement blocks, so there is no other inline home).
-        measurement_block = self._map_measurement(refl, description=measurement_description)
+        measurement_block = self._map_measurement(refl_list, description=measurement_description)
         description_placed = False
         if measurement_block is not None:
             record["measurement"] = measurement_block
@@ -233,15 +241,12 @@ class IsaacWriter:
 
         return ts
 
-    def _map_measurement(
-        self, refl_data: dict, description: str | None = None
+    def _build_series_item(
+        self, refl_data: dict, series_id: str, notes: str | None = None
     ) -> dict[str, Any] | None:
-        """Map Q/R/dR/dQ arrays to a measurement block.
+        """Build one ``measurement.series`` item from a single reflectivity dataset.
 
-        When ``description`` is given it is emitted as ``measurement.series[].notes``
-        — a free-text, human/AI-readable summary of how the measurement was made.
-        (Schema rev4 closes the ``measurement`` block but adds a ``notes`` string
-        to each series.)
+        Returns None when the dataset has no Q/R arrays.
         """
         q = refl_data.get("q", [])
         r = refl_data.get("r", [])
@@ -271,17 +276,92 @@ class IsaacWriter:
             )
 
         series_item: dict[str, Any] = {
-            "series_id": "reflectivity_profile",
+            "series_id": series_id,
             "independent_variables": [{"name": "q", "unit": "Å⁻¹", "values": list(q)}],
             "channels": channels,
         }
-        if description:
-            series_item["notes"] = description
+        if notes:
+            series_item["notes"] = notes
 
-        return {"series": [series_item], "qc": {"status": "valid"}}
+        return series_item
+
+    def _map_measurement(
+        self, refl_inputs: list[dict] | dict, description: str | None = None
+    ) -> dict[str, Any] | None:
+        """Map one or more reflectivity datasets to a measurement block.
+
+        Each dataset (one run / incident angle of the same physical state) becomes
+        one ``measurement.series`` entry. A single dataset keeps the legacy
+        ``series_id`` "reflectivity_profile"; multiple datasets are named by run
+        number (``run_<n>``). The free-text ``description`` (a state-level note of
+        how the measurement was made) rides on the first series' ``notes``.
+        (Schema rev4 closes the ``measurement`` block but adds a ``notes`` string
+        to each series.)
+        """
+        if isinstance(refl_inputs, dict):
+            refl_inputs = [refl_inputs]
+        refl_inputs = [r for r in refl_inputs if r]
+        single = len(refl_inputs) <= 1
+
+        series: list[dict[str, Any]] = []
+        seen: dict[str, int] = {}
+        for i, refl in enumerate(refl_inputs):
+            if single:
+                series_id = "reflectivity_profile"
+            else:
+                run = refl.get("run_number")
+                base = f"run_{run}" if run is not None else f"series_{i + 1}"
+                # Guarantee uniqueness if two runs share a number.
+                n = seen.get(base, 0)
+                seen[base] = n + 1
+                series_id = base if n == 0 else f"{base}_{n + 1}"
+            # Attach the state-level description to the first series that actually
+            # survives (a leading run with no Q/R must not swallow the notes).
+            item = self._build_series_item(
+                refl, series_id, notes=description if not series else None
+            )
+            if item is not None:
+                series.append(item)
+
+        if not series:
+            return None
+
+        return {"series": series, "qc": {"status": "valid"}}
+
+    @staticmethod
+    def _select_state_fit(model: dict | None, refl_list: list[dict]) -> dict | None:
+        """Return a fit view whose top-level ``layers`` are THIS state's fitted
+        layers, picked from ``fit.datasets[]`` by matching the state's runs.
+
+        A co-refinement fit links every run across every state; its top-level
+        ``layers`` mirror only the primary dataset. Without this, every per-state
+        ISAAC record would carry the first state's fitted structure. We match the
+        state's runs (by measurement_id, then run_number) to a ``datasets`` entry
+        and surface that entry's layers. Falls back to the model unchanged.
+        """
+        if not isinstance(model, dict):
+            return model
+        datasets = model.get("datasets")
+        if not datasets:
+            return model
+        run_ids = {r.get("id") for r in refl_list if r.get("id")}
+        run_nums = {
+            str(r.get("run_number")) for r in refl_list if r.get("run_number") is not None
+        }
+        matched = [
+            d
+            for d in datasets
+            if d.get("measurement_id") in run_ids or str(d.get("run_number")) in run_nums
+        ]
+        if matched and matched[0].get("layers"):
+            return {**model, "layers": matched[0]["layers"]}
+        return model
 
     def _map_descriptors(
-        self, refl_data: dict, now: datetime, reflectivity_model: dict | None = None
+        self,
+        refl_inputs: list[dict] | dict,
+        now: datetime,
+        reflectivity_model: dict | None = None,
     ) -> dict[str, Any]:
         """Extract automated descriptors from measurement data.
 
@@ -289,18 +369,28 @@ class IsaacWriter:
         tool, and — when a fitted ``reflectivity_model`` is present — a second
         group of model-derived descriptors (per-layer thickness/SLD/roughness
         with their fitted σ, plus χ²) attributed to the fitting software.
+
+        When several reflectivity datasets are given (the partials/angles of one
+        state), the data-range descriptors span them all: ``q_range_min``/``max``
+        over the union and ``total_points`` summed. The model descriptors are a
+        property of the state and are emitted once.
         """
-        q = refl_data.get("q", [])
+        if isinstance(refl_inputs, dict):
+            refl_inputs = [refl_inputs]
+        refl_inputs = [r for r in refl_inputs if r]
+
+        all_q = [v for refl in refl_inputs for v in (refl.get("q") or [])]
+        total_points = sum(len(refl.get("q") or []) for refl in refl_inputs)
 
         descriptors = []
-        if q:
+        if all_q:
             descriptors.extend(
                 [
                     {
                         "name": "q_range_min",
                         "kind": "absolute",
                         "source": "auto",
-                        "value": min(q),
+                        "value": min(all_q),
                         "unit": "Å⁻¹",
                         "uncertainty": self._no_uncertainty(),
                     },
@@ -308,7 +398,7 @@ class IsaacWriter:
                         "name": "q_range_max",
                         "kind": "absolute",
                         "source": "auto",
-                        "value": max(q),
+                        "value": max(all_q),
                         "unit": "Å⁻¹",
                         "uncertainty": self._no_uncertainty(),
                     },
@@ -316,14 +406,17 @@ class IsaacWriter:
                         "name": "total_points",
                         "kind": "absolute",
                         "source": "auto",
-                        "value": len(q),
+                        "value": total_points,
                         "unit": "count",
                         "uncertainty": self._no_uncertainty(),
                     },
                 ]
             )
 
-        geometry = refl_data.get("measurement_geometry")
+        geometry = next(
+            (r.get("measurement_geometry") for r in refl_inputs if r.get("measurement_geometry")),
+            None,
+        )
         if geometry:
             descriptors.append(
                 {
