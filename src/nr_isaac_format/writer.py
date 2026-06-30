@@ -247,7 +247,13 @@ class IsaacWriter:
             if isinstance(run_start, datetime):
                 ts["acquired_start_utc"] = run_start.isoformat().replace("+00:00", "Z")
             elif isinstance(run_start, str):
-                ts["acquired_start_utc"] = run_start
+                try:
+                    dt = datetime.fromisoformat(run_start)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    ts["acquired_start_utc"] = dt.isoformat().replace("+00:00", "Z")
+                except ValueError:
+                    ts["acquired_start_utc"] = run_start
 
         return ts
 
@@ -282,12 +288,12 @@ class IsaacWriter:
         dq = refl_data.get("dq", [])
         if dq:
             channels.append(
-                {"name": "dQ", "unit": "Å⁻¹", "role": "quality_monitor", "values": list(dq)}
+                {"name": "dQ", "unit": "angstrom^-1", "role": "quality_monitor", "values": list(dq)}
             )
 
         series_item: dict[str, Any] = {
             "series_id": series_id,
-            "independent_variables": [{"name": "q", "unit": "Å⁻¹", "values": list(q)}],
+            "independent_variables": [{"name": "q", "unit": "angstrom^-1", "values": list(q)}],
             "channels": channels,
         }
         if notes:
@@ -401,7 +407,7 @@ class IsaacWriter:
                         "kind": "absolute",
                         "source": "auto",
                         "value": min(all_q),
-                        "unit": "Å⁻¹",
+                        "unit": "angstrom^-1",
                         "uncertainty": self._no_uncertainty(),
                     },
                     {
@@ -409,7 +415,7 @@ class IsaacWriter:
                         "kind": "absolute",
                         "source": "auto",
                         "value": max(all_q),
-                        "unit": "Å⁻¹",
+                        "unit": "angstrom^-1",
                         "uncertainty": self._no_uncertainty(),
                     },
                     {
