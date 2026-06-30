@@ -71,6 +71,12 @@ class IsaacWriter:
         """
         now = datetime.now(timezone.utc)
         refl = result.reflectivity or {}
+        # All runs of this measurement state (partials/angles). One AssemblyResult
+        # = one state → one record with one series per run. Use the real
+        # ``reflectivities`` list when present; otherwise fall back to the single
+        # primary record (also keeps mocked results well-behaved).
+        _refls = getattr(result, "reflectivities", None)
+        refl_list = _refls if isinstance(_refls, list) else ([refl] if refl else [])
 
         # Resolve the environment record, augmenting it with the manifest's
         # environment text when the assembler did not supply one.
@@ -90,18 +96,26 @@ class IsaacWriter:
             "source_type": "facility",
             "timestamps": self._map_timestamps(refl, now),
             "descriptors": self._map_descriptors(
-                refl, now, getattr(result, "reflectivity_model", None)
+                refl_list,
+                now,
+                self._select_state_fit(getattr(result, "reflectivity_model", None), refl_list),
             ),
         }
 
         # The free-text description rides on measurement.series[].notes, where it
         # is directly readable (rev4 closes the top-level, context, and
         # measurement blocks, so there is no other inline home).
-        measurement_block = self._map_measurement(refl, description=measurement_description)
+        measurement_block = self._map_measurement(refl_list, description=measurement_description)
         description_placed = False
         if measurement_block is not None:
             record["measurement"] = measurement_block
             description_placed = bool(measurement_description)
+
+        # Stable physical-sample identity. Prefer the assembled sample record's
+        # ``id``; fall back to the reflectivity's ``sample_id`` FK when no sample
+        # record is present (e.g. an externally reused sample). Records of one
+        # physical sample share this; distinct-sample states differ.
+        resolved_sample_id = (result.sample or {}).get("id") or refl.get("sample_id")
 
         # Optional sample block
         if result.sample:
@@ -109,6 +123,7 @@ class IsaacWriter:
                 result.sample,
                 sample_name=sample_name,
                 sample_formula=sample_formula,
+                sample_id=resolved_sample_id,
             )
             if sample_block:
                 record["sample"] = sample_block
@@ -119,7 +134,10 @@ class IsaacWriter:
             }
             if sample_name:
                 material["notes"] = sample_name
-            record["sample"] = {"sample_form": "film", "material": material}
+            sample_block = {"sample_form": "film", "material": material}
+            if resolved_sample_id:
+                sample_block["sample_id"] = str(resolved_sample_id)
+            record["sample"] = sample_block
 
         # Context block (rev3/rev4: typed fields only). Prefer the data-assembler's
         # structured electrochemical conditions (control_mode/potential/electrolyte/
@@ -229,19 +247,22 @@ class IsaacWriter:
             if isinstance(run_start, datetime):
                 ts["acquired_start_utc"] = run_start.isoformat().replace("+00:00", "Z")
             elif isinstance(run_start, str):
-                ts["acquired_start_utc"] = run_start
+                try:
+                    dt = datetime.fromisoformat(run_start)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    ts["acquired_start_utc"] = dt.isoformat().replace("+00:00", "Z")
+                except ValueError:
+                    ts["acquired_start_utc"] = run_start
 
         return ts
 
-    def _map_measurement(
-        self, refl_data: dict, description: str | None = None
+    def _build_series_item(
+        self, refl_data: dict, series_id: str, notes: str | None = None
     ) -> dict[str, Any] | None:
-        """Map Q/R/dR/dQ arrays to a measurement block.
+        """Build one ``measurement.series`` item from a single reflectivity dataset.
 
-        When ``description`` is given it is emitted as ``measurement.series[].notes``
-        — a free-text, human/AI-readable summary of how the measurement was made.
-        (Schema rev4 closes the ``measurement`` block but adds a ``notes`` string
-        to each series.)
+        Returns None when the dataset has no Q/R arrays.
         """
         q = refl_data.get("q", [])
         r = refl_data.get("r", [])
@@ -267,21 +288,96 @@ class IsaacWriter:
         dq = refl_data.get("dq", [])
         if dq:
             channels.append(
-                {"name": "dQ", "unit": "Å⁻¹", "role": "quality_monitor", "values": list(dq)}
+                {"name": "dQ", "unit": "angstrom^-1", "role": "quality_monitor", "values": list(dq)}
             )
 
         series_item: dict[str, Any] = {
-            "series_id": "reflectivity_profile",
-            "independent_variables": [{"name": "q", "unit": "Å⁻¹", "values": list(q)}],
+            "series_id": series_id,
+            "independent_variables": [{"name": "q", "unit": "angstrom^-1", "values": list(q)}],
             "channels": channels,
         }
-        if description:
-            series_item["notes"] = description
+        if notes:
+            series_item["notes"] = notes
 
-        return {"series": [series_item], "qc": {"status": "valid"}}
+        return series_item
+
+    def _map_measurement(
+        self, refl_inputs: list[dict] | dict, description: str | None = None
+    ) -> dict[str, Any] | None:
+        """Map one or more reflectivity datasets to a measurement block.
+
+        Each dataset (one run / incident angle of the same physical state) becomes
+        one ``measurement.series`` entry. A single dataset keeps the legacy
+        ``series_id`` "reflectivity_profile"; multiple datasets are named by run
+        number (``run_<n>``). The free-text ``description`` (a state-level note of
+        how the measurement was made) rides on the first series' ``notes``.
+        (Schema rev4 closes the ``measurement`` block but adds a ``notes`` string
+        to each series.)
+        """
+        if isinstance(refl_inputs, dict):
+            refl_inputs = [refl_inputs]
+        refl_inputs = [r for r in refl_inputs if r]
+        single = len(refl_inputs) <= 1
+
+        series: list[dict[str, Any]] = []
+        seen: dict[str, int] = {}
+        for i, refl in enumerate(refl_inputs):
+            if single:
+                series_id = "reflectivity_profile"
+            else:
+                run = refl.get("run_number")
+                base = f"run_{run}" if run is not None else f"series_{i + 1}"
+                # Guarantee uniqueness if two runs share a number.
+                n = seen.get(base, 0)
+                seen[base] = n + 1
+                series_id = base if n == 0 else f"{base}_{n + 1}"
+            # Attach the state-level description to the first series that actually
+            # survives (a leading run with no Q/R must not swallow the notes).
+            item = self._build_series_item(
+                refl, series_id, notes=description if not series else None
+            )
+            if item is not None:
+                series.append(item)
+
+        if not series:
+            return None
+
+        return {"series": series, "qc": {"status": "valid"}}
+
+    @staticmethod
+    def _select_state_fit(model: dict | None, refl_list: list[dict]) -> dict | None:
+        """Return a fit view whose top-level ``layers`` are THIS state's fitted
+        layers, picked from ``fit.datasets[]`` by matching the state's runs.
+
+        A co-refinement fit links every run across every state; its top-level
+        ``layers`` mirror only the primary dataset. Without this, every per-state
+        ISAAC record would carry the first state's fitted structure. We match the
+        state's runs (by measurement_id, then run_number) to a ``datasets`` entry
+        and surface that entry's layers. Falls back to the model unchanged.
+        """
+        if not isinstance(model, dict):
+            return model
+        datasets = model.get("datasets")
+        if not datasets:
+            return model
+        run_ids = {r.get("id") for r in refl_list if r.get("id")}
+        run_nums = {
+            str(r.get("run_number")) for r in refl_list if r.get("run_number") is not None
+        }
+        matched = [
+            d
+            for d in datasets
+            if d.get("measurement_id") in run_ids or str(d.get("run_number")) in run_nums
+        ]
+        if matched and matched[0].get("layers"):
+            return {**model, "layers": matched[0]["layers"]}
+        return model
 
     def _map_descriptors(
-        self, refl_data: dict, now: datetime, reflectivity_model: dict | None = None
+        self,
+        refl_inputs: list[dict] | dict,
+        now: datetime,
+        reflectivity_model: dict | None = None,
     ) -> dict[str, Any]:
         """Extract automated descriptors from measurement data.
 
@@ -289,41 +385,54 @@ class IsaacWriter:
         tool, and — when a fitted ``reflectivity_model`` is present — a second
         group of model-derived descriptors (per-layer thickness/SLD/roughness
         with their fitted σ, plus χ²) attributed to the fitting software.
+
+        When several reflectivity datasets are given (the partials/angles of one
+        state), the data-range descriptors span them all: ``q_range_min``/``max``
+        over the union and ``total_points`` summed. The model descriptors are a
+        property of the state and are emitted once.
         """
-        q = refl_data.get("q", [])
+        if isinstance(refl_inputs, dict):
+            refl_inputs = [refl_inputs]
+        refl_inputs = [r for r in refl_inputs if r]
+
+        all_q = [v for refl in refl_inputs for v in (refl.get("q") or [])]
+        total_points = sum(len(refl.get("q") or []) for refl in refl_inputs)
 
         descriptors = []
-        if q:
+        if all_q:
             descriptors.extend(
                 [
                     {
                         "name": "q_range_min",
                         "kind": "absolute",
                         "source": "auto",
-                        "value": min(q),
-                        "unit": "Å⁻¹",
+                        "value": min(all_q),
+                        "unit": "angstrom^-1",
                         "uncertainty": self._no_uncertainty(),
                     },
                     {
                         "name": "q_range_max",
                         "kind": "absolute",
                         "source": "auto",
-                        "value": max(q),
-                        "unit": "Å⁻¹",
+                        "value": max(all_q),
+                        "unit": "angstrom^-1",
                         "uncertainty": self._no_uncertainty(),
                     },
                     {
                         "name": "total_points",
                         "kind": "absolute",
                         "source": "auto",
-                        "value": len(q),
+                        "value": total_points,
                         "unit": "count",
                         "uncertainty": self._no_uncertainty(),
                     },
                 ]
             )
 
-        geometry = refl_data.get("measurement_geometry")
+        geometry = next(
+            (r.get("measurement_geometry") for r in refl_inputs if r.get("measurement_geometry")),
+            None,
+        )
         if geometry:
             descriptors.append(
                 {
@@ -455,12 +564,22 @@ class IsaacWriter:
         sample: dict,
         sample_name: str | None = None,
         sample_formula: str | None = None,
+        sample_id: str | None = None,
     ) -> dict[str, Any] | None:
-        """Map sample record to ISAAC sample block."""
+        """Map sample record to ISAAC sample block.
+
+        ``sample_id`` is the stable identifier of the PHYSICAL sample (the
+        data-assembler's sample FK). Two records carry the same ``sample_id``
+        iff they measured the same physical object — which is what gives
+        ``links[].same_sample_as`` its meaning. Distinct-sample co-refinements
+        carry a different id per state, so their records do not share one.
+        """
         if not sample:
             return None
 
         result: dict[str, Any] = {"sample_form": "film"}
+        if sample_id:
+            result["sample_id"] = str(sample_id)
 
         composition = sample.get("main_composition")
         # Use manifest sample info when assembler composition is missing or unknown

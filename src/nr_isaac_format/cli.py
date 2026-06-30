@@ -727,57 +727,217 @@ def plan_to_manifest(
 # ---------------------------------------------------------------------------
 
 
-def _load_assembly_from_ingest(ingest_dir: Path):
-    """Reconstruct an AssemblyResult from a data-assembler ingest output dir.
+def _load_ingest_records(ingest_dir: Path) -> tuple[list[dict], dict, dict, dict | None]:
+    """Load the raw records from a data-assembler ingest dir.
 
-    Prefers JSON files (written when ingest is run with ``--json``); falls
-    back to the always-present Parquet files. Searches recursively so this
-    works for both the single-ingest layout (``<dir>/reflectivity/...``)
-    and the batch layout (``<dir>/json/<run>/...``).
+    Prefers JSON (written with ``--json``); falls back to Parquet. Loads ALL
+    reflectivity records (a state has several angles) and ALL sample/environment
+    records (a multi-state run has one of each per state), keyed by id, plus the
+    single fit record. Handles both the flat single-state layout
+    (``json/sample.json``) and the multi-state layout (``json/sample/<id>.json``).
+
+    Returns ``(reflectivity_records, samples_by_id, envs_by_id, fit)``.
     """
-    from assembler.workflow import AssemblyResult
-
-    tables = ("reflectivity", "sample", "environment", "reflectivity_model")
-    loaded: dict[str, dict] = {}
+    reflectivity_records: list[dict] = []
+    samples: list[dict] = []
+    environments: list[dict] = []
+    fit: dict | None = None
 
     json_root = ingest_dir / "json"
     if json_root.is_dir():
-        for table in tables:
-            matches = sorted(json_root.rglob(f"{table}.json"))
-            if matches:
-                with open(matches[0]) as f:
-                    loaded[table] = json.load(f)
+        for m in sorted(json_root.rglob("reflectivity.json")):
+            with open(m) as f:
+                reflectivity_records.append(json.load(f))
+        for m in sorted(json_root.rglob("sample.json")) + sorted(
+            (json_root / "sample").glob("*.json")
+        ):
+            with open(m) as f:
+                samples.append(json.load(f))
+        for m in sorted(json_root.rglob("environment.json")) + sorted(
+            (json_root / "environment").glob("*.json")
+        ):
+            with open(m) as f:
+                environments.append(json.load(f))
+        fm = sorted(json_root.rglob("reflectivity_model.json"))
+        if fm:
+            with open(fm[0]) as f:
+                fit = json.load(f)
 
-    missing = [t for t in tables if t not in loaded and t in ("reflectivity",)]
-    if missing or not loaded:
-        # Fall back to Parquet for anything not already loaded from JSON.
-        # Use ParquetFile (not read_table) to read individual files without
-        # triggering Hive-partition auto-detection on the parent dirs.
+    # Parquet fallback (each table dir holds id-keyed *.parquet files).
+    def _pq_all(table: str) -> list[dict]:
         import pyarrow.parquet as pq
 
-        for table in tables:
-            if table in loaded:
-                continue
-            table_dir = ingest_dir / table
-            matches = sorted(table_dir.rglob("*.parquet")) if table_dir.is_dir() else []
-            if not matches:
-                continue
-            records = pq.ParquetFile(str(matches[0])).read().to_pylist()
-            if records:
-                loaded[table] = records[0]
+        d = ingest_dir / table
+        out: list[dict] = []
+        for m in sorted(d.rglob("*.parquet")) if d.is_dir() else []:
+            out.extend(pq.ParquetFile(str(m)).read().to_pylist())
+        return out
 
-    if "reflectivity" not in loaded:
+    if not reflectivity_records:
+        reflectivity_records = _pq_all("reflectivity")
+    if not samples:
+        samples = _pq_all("sample")
+    if not environments:
+        environments = _pq_all("environment")
+    if fit is None:
+        fits = _pq_all("reflectivity_model")
+        fit = fits[0] if fits else None
+
+    # Sort runs deterministically by run number (files are id-keyed on disk, so
+    # disk order is arbitrary). This makes the per-state primary run the lowest
+    # number and keeps series in ascending Q-segment order.
+    def _run_sort_key(r: dict):
+        rn = r.get("run_number")
+        try:
+            return (0, int(rn))
+        except (TypeError, ValueError):
+            return (1, str(rn))
+
+    reflectivity_records.sort(key=_run_sort_key)
+
+    samples_by_id = {s.get("id"): s for s in samples}
+    envs_by_id = {e.get("id"): e for e in environments}
+    return reflectivity_records, samples_by_id, envs_by_id, fit
+
+
+def _assembly_result(reflectivity, additional, sample, environment, fit):
+    """Build an AssemblyResult, tolerating an older data-assembler.
+
+    The multi-run ``additional_reflectivities`` field only exists on the updated
+    data-assembler. When running against an older one, construct with the base
+    fields and attach the extras only if supported — degrading to single-series
+    with a clear warning rather than crashing on an unexpected kwarg.
+    """
+    from assembler.workflow import AssemblyResult
+
+    result = AssemblyResult(
+        reflectivity=reflectivity,
+        sample=sample,
+        environment=environment,
+        reflectivity_model=fit,
+    )
+    extra = [r for r in (additional or []) if r]
+    if extra:
+        if hasattr(result, "additional_reflectivities"):
+            result.additional_reflectivities = list(extra)
+        else:
+            click.echo(
+                click.style(
+                    f"  Warning: the installed data-assembler predates multi-run "
+                    f"support; {len(extra)} extra run(s) dropped (single series). "
+                    f"Upgrade data-assembler for multi-angle / multi-state export.",
+                    fg="yellow",
+                ),
+                err=True,
+            )
+    return result
+
+
+def _load_assembly_from_ingest(ingest_dir: Path):
+    """Reconstruct a single AssemblyResult from an ingest dir (all runs, one state).
+
+    Loads every reflectivity record (a multi-angle state has several) plus the
+    first sample/environment and the fit. For a multi-state dir use
+    :func:`_load_states_from_ingest` to split per state instead.
+    """
+    reflectivity_records, samples_by_id, envs_by_id, fit = _load_ingest_records(ingest_dir)
+    if not reflectivity_records:
         raise click.ClickException(
             f"No reflectivity output found in {ingest_dir} "
-            "(looked for json/reflectivity.json and reflectivity/*.parquet)"
+            "(looked for json/**/reflectivity.json and reflectivity/*.parquet)"
+        )
+    samples = list(samples_by_id.values())
+    envs = list(envs_by_id.values())
+    return _assembly_result(
+        reflectivity=reflectivity_records[0],
+        additional=reflectivity_records[1:],
+        sample=samples[0] if samples else None,
+        environment=envs[0] if envs else None,
+        fit=fit,
+    )
+
+
+def _load_states_from_ingest(ingest_dir: Path) -> list:
+    """Split an ingest dir into one AssemblyResult per state.
+
+    A state is the set of runs sharing ``(sample_id, environment_id)`` — recovered
+    entirely from the store's foreign keys (no manifest, no file-name parsing).
+    Each result carries that state's runs (one series each downstream), its
+    matching sample and environment, and the shared fit. Runs missing FKs fall
+    into a single default group, preserving single-state behavior.
+    """
+    reflectivity_records, samples_by_id, envs_by_id, fit = _load_ingest_records(ingest_dir)
+    if not reflectivity_records:
+        raise click.ClickException(
+            f"No reflectivity output found in {ingest_dir} "
+            "(looked for json/**/reflectivity.json and reflectivity/*.parquet)"
         )
 
-    return AssemblyResult(
-        reflectivity=loaded.get("reflectivity"),
-        sample=loaded.get("sample"),
-        environment=loaded.get("environment"),
-        reflectivity_model=loaded.get("reflectivity_model"),
-    )
+    # Group by (sample_id, environment_id), preserving first-seen order.
+    groups: dict[tuple, list[dict]] = {}
+    order: list[tuple] = []
+    for refl in reflectivity_records:
+        key = (refl.get("sample_id"), refl.get("environment_id"))
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(refl)
+
+    results = []
+    for sid, eid in order:
+        runs = groups[(sid, eid)]
+        results.append(
+            _assembly_result(
+                reflectivity=runs[0],
+                additional=runs[1:],
+                sample=samples_by_id.get(sid) or (next(iter(samples_by_id.values()), None)),
+                environment=envs_by_id.get(eid) or (next(iter(envs_by_id.values()), None)),
+                fit=fit,
+            )
+        )
+    return results
+
+
+def _wire_same_sample_links(records: list[dict]) -> None:
+    """Cross-link ISAAC records that measured the same physical sample, in place.
+
+    Records sharing a ``sample.sample_id`` get reciprocal ``same_sample_as``
+    links (``rel=same_sample_as``, ``basis=same_sample_id``) targeting each
+    other's ``record_id`` — the ISAAC schema's mechanism for asserting "these
+    records are the same physical object." This is the multi-state co-refinement
+    of ONE sample (the default): every per-state record points at its siblings.
+
+    Records with no ``sample_id``, or a unique one (e.g. a ``distinct_sample``
+    co-refinement, where each state is a different physical sample), are left
+    unlinked. Idempotent: an existing identical link is not duplicated.
+    """
+    groups: dict[str, list[dict]] = {}
+    for rec in records:
+        sample = rec.get("sample") if isinstance(rec, dict) else None
+        sid = sample.get("sample_id") if isinstance(sample, dict) else None
+        if sid:
+            groups.setdefault(str(sid), []).append(rec)
+
+    for group in groups.values():
+        if len(group) < 2:
+            continue  # a lone record has no sibling to link to
+        for rec in group:
+            links = rec.setdefault("links", [])
+            existing = {(lk.get("rel"), lk.get("target")) for lk in links}
+            for other in group:
+                target = other.get("record_id")
+                if other is rec or not target:
+                    continue
+                if ("same_sample_as", target) in existing:
+                    continue
+                links.append(
+                    {
+                        "rel": "same_sample_as",
+                        "target": target,
+                        "basis": "same_sample_id",
+                    }
+                )
+                existing.add(("same_sample_as", target))
 
 
 @main.command("convert-ingest")
@@ -865,7 +1025,9 @@ def convert_ingest(
         raise click.UsageError(f"INGEST_DIR does not exist: {ingest_dir}")
 
     try:
-        result = _load_assembly_from_ingest(ingest_dir)
+        # One AssemblyResult per state (runs sharing sample_id+environment_id).
+        # Single-state dirs yield a one-element list → unchanged behavior.
+        states = _load_states_from_ingest(ingest_dir)
     except click.ClickException as e:
         _fail_manifest(f"convert-ingest failed to read ingest dir: {e}")
         raise
@@ -874,68 +1036,101 @@ def convert_ingest(
         click.echo(click.style(f"Error reading ingest output: {e}", fg="red"), err=True)
         sys.exit(1)
 
+    n_states = len(states)
     if reduced_file:
-        result.reduced_file = reduced_file
+        states[0].reduced_file = reduced_file
 
-    refl = result.reflectivity or {}
-    run_number = refl.get("run_number")
-    title = refl.get("run_title") or (f"run {run_number}" if run_number else ingest_dir.name)
-
+    first_refl = states[0].reflectivity or {}
+    title = first_refl.get("run_title") or (
+        f"run {first_refl.get('run_number')}" if first_refl.get("run_number") else ingest_dir.name
+    )
     click.echo(click.style(f"Converting: {title}", fg="cyan", bold=True))
-    if run_number:
-        click.echo(f"  Run: {run_number}")
     click.echo(f"  Source: {ingest_dir}")
-
-    if result.sample:
-        click.echo(
-            f"  Sample: {result.sample.get('description', 'unknown')} "
-            f"({str(result.sample.get('id', ''))[:8]}...)"
-        )
-    if result.environment:
-        click.echo(f"  Environment: {result.environment.get('description', 'unknown')}")
-    if refl.get("q"):
-        click.echo(f"  Reflectivity: {len(refl['q'])} Q points")
+    if n_states > 1:
+        click.echo(f"  States: {n_states} → {n_states} ISAAC record(s) (one per state)")
     click.echo()
 
+    # Resolve output: explicit .json file (single state only), or a directory.
+    if output is None:
+        out_dir, out_file_explicit = ingest_dir, None
+    elif output.suffix == ".json":
+        out_dir, out_file_explicit = output.parent, output
+    else:
+        out_dir, out_file_explicit = output, None
+
+    if out_file_explicit is not None and n_states > 1:
+        msg = f"{n_states} states found; pass -o as a directory (one record is written per state)."
+        _fail_manifest(msg)
+        raise click.UsageError(msg)
+
     writer = IsaacWriter()
-    record = writer.to_isaac(
-        result,
-        environment_description=environment_desc,
-        context_description=context,
-        raw_file_path=raw_file,
-        sample_name=sample_name,
-        sample_formula=sample_formula,
-    )
+    # Pass 1: build every record (record_id assigned here). We build all records
+    # before writing so per-state records of one physical sample can be
+    # cross-linked by record_id (same_sample_as) — a forward reference no
+    # single-record pass could resolve.
+    built: list[tuple] = []  # (run_number, record)
+    for state in states:
+        refl = state.reflectivity or {}
+        run_number = refl.get("run_number")
+        if state.sample:
+            click.echo(
+                f"  Sample: {state.sample.get('description', 'unknown')} "
+                f"({str(state.sample.get('id', ''))[:8]}...)"
+            )
+        if state.environment:
+            click.echo(f"  Environment: {state.environment.get('description', 'unknown')}")
+        runs = state.reflectivities
+        total_q = sum(len(r.get("q") or []) for r in runs)
+        label = f"run {run_number}" if run_number else "state"
+        click.echo(f"  [{label}] {len(runs)} run(s) → {len(runs)} series; {total_q} Q points")
+
+        record = writer.to_isaac(
+            state,
+            environment_description=environment_desc,
+            context_description=context,
+            raw_file_path=raw_file,
+            sample_name=sample_name,
+            sample_formula=sample_formula,
+        )
+        built.append((run_number, record))
+
+    # Cross-link records that measured the SAME physical sample (multi-state
+    # co-refinement of one sample → reciprocal same_sample_as). distinct_sample
+    # states carry distinct sample_ids upstream and stay unlinked.
+    _wire_same_sample_links([rec for _, rec in built])
+    n_links = sum(len(rec.get("links") or []) for _, rec in built)
+    if n_links:
+        click.echo(f"  Linked {n_links} same_sample_as relation(s) across states")
 
     if dry_run:
-        click.echo(click.style("(dry run — not written)", fg="cyan"))
+        click.echo(click.style(f"  (dry run — {len(built)} record(s) not written)", fg="cyan"))
         return
 
-    # Resolve output path: file vs directory
-    if output is None:
-        out_dir = ingest_dir
-        out_file = None
-    elif output.suffix == ".json":
-        out_dir = output.parent
-        out_file = output
-    else:
-        out_dir = output
-        out_file = None
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    if out_file is None:
-        if run_number:
-            out_file = out_dir / f"isaac_record_{run_number}.json"
+    written: list[Path] = []
+    for run_number, record in built:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        if out_file_explicit is not None:
+            out_file = out_file_explicit
         else:
-            out_file = out_dir / "isaac_record.json"
+            # Guarantee a unique filename per state: two states can share (or
+            # lack) a primary run_number, which would otherwise overwrite.
+            base = f"isaac_record_{run_number}" if run_number else "isaac_record"
+            out_file = out_dir / f"{base}.json"
+            dup = 2
+            while out_file in written:
+                out_file = out_dir / f"{base}_{dup}.json"
+                dup += 1
 
-    with open(out_file, "w") as f:
-        json.dump(record, f, indent=None if compact else 2, default=str)
-
-    click.echo(click.style(f"Wrote: {out_file}", fg="green"))
+        with open(out_file, "w") as f:
+            json.dump(record, f, indent=None if compact else 2, default=str)
+        written.append(out_file)
+        click.echo(click.style(f"  Wrote: {out_file}", fg="green"))
 
     if result_out is not None:
+        if len(written) == 1:
+            artifacts = {"isaac_record": str(written[0].resolve())}
+        else:
+            artifacts = {"isaac_records": [str(p.resolve()) for p in written]}
         write_manifest(
             result_out,
             "nr-isaac-format",
@@ -945,8 +1140,8 @@ def convert_ingest(
                 "reduced_input": reduced_file,
                 "nexus_input": raw_file,
             },
-            artifacts={"isaac_record": str(out_file.resolve())},
-            info={"isaac_status": "converted"},
+            artifacts=artifacts,
+            info={"isaac_status": "converted", "record_count": len(written)},
         )
         click.echo(click.style(f"Result manifest written: {Path(result_out).resolve()}", fg="green"))
 

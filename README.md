@@ -120,7 +120,9 @@ nr-isaac-format push output/ --validate-only
 
 ### `nr-isaac-format convert-ingest` (canonical)
 
-Map a data-assembler ingest directory (the `reflectivity`/`sample`/`environment`/`reflectivity_model` records, as Parquet or JSON) to a single ISAAC record. This is the canonical route — fitted layers + σ, χ², and structured conditions flow straight through from the assembler.
+Map a data-assembler ingest directory (the `reflectivity`/`sample`/`environment`/`reflectivity_model` records, as Parquet or JSON) to ISAAC records. This is the canonical route — fitted layers + σ, χ², and structured conditions flow straight through from the assembler.
+
+Runs are grouped into states by their `(sample_id, environment_id)` FKs → **one record per state** (a single-state dir yields exactly one). Each record carries its physical-sample identity as `sample.sample_id`; records of the same physical sample (a multi-state co-refinement) are cross-linked with `links[].same_sample_as`. A `distinct_sample` co-refinement (each state a different sample) keeps distinct ids and no links. With multiple states, pass `-o` as a directory (one file per state); an explicit `.json` target is rejected.
 
 ```bash
 nr-isaac-format convert-ingest [OPTIONS] INGEST_DIR
@@ -347,9 +349,10 @@ Each ISAAC record is a JSON file conforming to the ISAAC AI-Ready Scientific Rec
 | `source_type` | Origin of the data (`"facility"`) |
 | `measurement` | Q/R/dR/dQ reflectivity series, QC status, and a free-text `series[].notes` describing how the measurement was made |
 | `descriptors` | Computed descriptors: q-range, total points, geometry, etc. |
-| `sample` | Composition, sample form (`film`), provenance, and free-text `material.notes` |
+| `sample` | Composition, sample form (`film`), provenance, free-text `material.notes`, and `sample_id` — the data-assembler's stable physical-sample identity (FK). Records of the same physical sample share it |
 | `context` | Environment enum, temperature, thermodynamics, and `electrochemistry`. When the assembler supplies structured conditions (control_mode, potential, scale, pH, electrolyte) they are used directly; otherwise applied potentials are parsed from the description (defaulting to the SHE scale) |
 | `system` | Instrument, facility, configuration |
+| `links` | `same_sample_as` links (`basis: same_sample_id`) connecting the per-state records of one physical sample in a multi-state co-refinement. Absent for a single record or a `distinct_sample` co-refinement (each state a different sample) |
 | `assets` | Raw NeXus file pointer, reduced data file with SHA-256 |
 
 ## Development

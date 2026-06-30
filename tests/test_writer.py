@@ -133,6 +133,28 @@ class TestIsaacWriter:
         assert record["sample"]["material"]["formula"] == "Fe/Si"
         # No provenance in enum for plain mock data → key omitted
         assert "provenance" not in record["sample"]["material"]
+        # No FK on the assembled sample record → no sample_id emitted.
+        assert "sample_id" not in record["sample"]
+
+    def test_sample_id_emitted_from_sample_record(self):
+        """The assembled sample record's id surfaces as ISAAC sample.sample_id —
+        the stable physical-sample identity that gives same_sample_as meaning."""
+        result = create_mock_result(
+            reflectivity={"facility": "SNS", "sample_id": "phys-sample-1"},
+            sample={"id": "phys-sample-1", "main_composition": "Cu"},
+        )
+        record = IsaacWriter().to_isaac(result)
+        assert record["sample"]["sample_id"] == "phys-sample-1"
+
+    def test_sample_id_falls_back_to_reflectivity_fk(self):
+        """With no assembled sample record but a manifest name, sample_id is
+        recovered from the reflectivity's sample_id FK."""
+        result = create_mock_result(
+            reflectivity={"facility": "SNS", "sample_id": "phys-sample-2"},
+            sample=None,
+        )
+        record = IsaacWriter().to_isaac(result, sample_name="Cu on Si")
+        assert record["sample"]["sample_id"] == "phys-sample-2"
         # Schema rev3 has a self-contradictory geometry definition; the writer
         # omits the geometry block entirely until upstream is fixed.
         assert "geometry" not in record["sample"]
